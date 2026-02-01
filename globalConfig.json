@@ -1,0 +1,280 @@
+{
+    "pages": {
+        "configuration": {
+            "tabs": [
+                {
+                    "name": "account",
+                    "table": {
+                        "actions": [
+                            "edit",
+                            "delete",
+                            "clone"
+                        ],
+                        "header": [
+                            {
+                                "label": "Name",
+                                "field": "name"
+                            }
+                        ]
+                    },
+                    "entity": [
+                        {
+                            "type": "text",
+                            "label": "Name",
+                            "validators": [
+                                {
+                                    "type": "regex",
+                                    "errorMsg": "Account Name must begin with a letter and consist exclusively of alphanumeric characters and underscores.",
+                                    "pattern": "^[a-zA-Z]\\w*$"
+                                },
+                                {
+                                    "type": "string",
+                                    "errorMsg": "Length of input name should be between 1 and 100",
+                                    "minLength": 1,
+                                    "maxLength": 100
+                                }
+                            ],
+                            "field": "name",
+                            "help": "A unique name for the account.",
+                            "required": true
+                        },
+                        {
+                            "type": "text",
+                            "label": "OpenAI API Key",
+                            "field": "api_key",
+                            "help": "Your OpenAI API key for authentication. This will be stored securely and encrypted.",
+                            "required": true,
+                            "encrypted": true,
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "errorMsg": "API key is required and must be between 1 and 200 characters",
+                                    "minLength": 1,
+                                    "maxLength": 200
+                                }
+                            ]
+                        },
+                        {
+                            "type": "text",
+                            "label": "Organization ID",
+                            "field": "organization_id",
+                            "help": "Optional OpenAI Organization ID. Leave empty if not using organizations.",
+                            "required": false,
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "errorMsg": "Organization ID should be between 1 and 100 characters",
+                                    "minLength": 1,
+                                    "maxLength": 100
+                                }
+                            ]
+                        }
+                    ],
+                    "title": "Accounts"
+                },
+                {
+                    "type": "loggingTab"
+                }
+            ],
+            "title": "Configuration",
+            "description": "Set up your add-on"
+        },
+        "inputs": {
+            "services": [
+                {
+                    "name": "openai_usage",
+                    "entity": [
+                        {
+                            "type": "text",
+                            "label": "Name",
+                            "validators": [
+                                {
+                                    "type": "regex",
+                                    "errorMsg": "Input Name must begin with a letter and consist exclusively of alphanumeric characters and underscores.",
+                                    "pattern": "^[a-zA-Z]\\w*$"
+                                },
+                                {
+                                    "type": "string",
+                                    "errorMsg": "Length of input name should be between 1 and 100",
+                                    "minLength": 1,
+                                    "maxLength": 100
+                                }
+                            ],
+                            "field": "name",
+                            "help": "A unique name for the data input.",
+                            "required": true
+                        },
+                        {
+                            "type": "interval",
+                            "label": "Interval",
+                            "defaultValue": "3600",
+                            "field": "interval",
+                            "options": {
+                                "range": [
+                                    300,
+                                    86400
+                                ]
+                            },
+                            "help": "Time interval for polling OpenAI usage data, in seconds. Default: 3600 (1 hour). Range: 300 (5 minutes) to 86400 (24 hours).",
+                            "required": true
+                        },
+                        {
+                            "type": "index",
+                            "field": "index",
+                            "label": "Index",
+                            "defaultValue": "main",
+                            "required": true,
+                            "help": "Splunk index where OpenAI usage data will be stored."
+                        },
+                        {
+                            "type": "singleSelect",
+                            "label": "Account to use",
+                            "options": {
+                                "referenceName": "account"
+                            },
+                            "help": "Select the OpenAI account configured in the Account tab.",
+                            "field": "account",
+                            "required": true,
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "errorMsg": "Length of account name should be between 1 and 100",
+                                    "minLength": 1,
+                                    "maxLength": 100
+                                }
+                            ]
+                        },
+                        {
+                            "type": "text",
+                            "label": "Start Date",
+                            "field": "start_date",
+                            "help": "Optional start date for collecting usage data in YYYY-MM-DD format. If not specified, collects data from the last polling interval.",
+                            "required": false,
+                            "validators": [
+                                {
+                                    "type": "regex",
+                                    "errorMsg": "Start date must be in YYYY-MM-DD format (e.g., 2024-01-15)",
+                                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                                }
+                            ]
+                        },
+                        {
+                            "type": "multipleSelect",
+                            "label": "Models to Track",
+                            "field": "models",
+                            "help": "Select which OpenAI models to track usage for. Select 'All Models' to track all available models.",
+                            "required": false,
+                            "defaultValue": "gpt-4,gpt-3.5-turbo",
+                            "options": {
+                                "items": [
+                                    {
+                                        "value": "gpt-4",
+                                        "label": "GPT-4"
+                                    },
+                                    {
+                                        "value": "gpt-4-turbo",
+                                        "label": "GPT-4 Turbo"
+                                    },
+                                    {
+                                        "value": "gpt-3.5-turbo",
+                                        "label": "GPT-3.5 Turbo"
+                                    },
+                                    {
+                                        "value": "*",
+                                        "label": "All Models"
+                                    }
+                                ],
+                                "delimiter": ","
+                            }
+                        }
+                    ],
+                    "inputHelperModule": "openai_usage_helper",
+                    "title": "openai_usage"
+                }
+            ],
+            "title": "Inputs",
+            "description": "Manage your data inputs",
+            "table": {
+                "actions": [
+                    "edit",
+                    "delete",
+                    "clone"
+                ],
+                "header": [
+                    {
+                        "label": "Name",
+                        "field": "name"
+                    },
+                    {
+                        "label": "Interval",
+                        "field": "interval"
+                    },
+                    {
+                        "label": "Index",
+                        "field": "index"
+                    },
+                    {
+                        "label": "Account",
+                        "field": "account"
+                    },
+                    {
+                        "label": "Status",
+                        "field": "disabled"
+                    }
+                ],
+                "moreInfo": [
+                    {
+                        "label": "Name",
+                        "field": "name"
+                    },
+                    {
+                        "label": "Interval",
+                        "field": "interval"
+                    },
+                    {
+                        "label": "Index",
+                        "field": "index"
+                    },
+                    {
+                        "label": "Account",
+                        "field": "account"
+                    },
+                    {
+                        "label": "Models",
+                        "field": "models"
+                    },
+                    {
+                        "label": "Start Date",
+                        "field": "start_date"
+                    },
+                    {
+                        "label": "Status",
+                        "field": "disabled",
+                        "mapping": {
+                            "true": "Inactive",
+                            "false": "Active"
+                        }
+                    }
+                ]
+            }
+        },
+        "dashboard": {
+            "panels": [
+                {
+                    "name": "default"
+                }
+            ]
+        }
+    },
+    "meta": {
+        "name": "TA-openai-usage",
+        "restRoot": "TA-openai-usage",
+        "version": "1.0.0",
+        "displayName": "OpenAI API Usage Monitor",
+        "schemaVersion": "0.0.10",
+        "supportedThemes": [
+            "light",
+            "dark"
+        ]
+    }
+}
