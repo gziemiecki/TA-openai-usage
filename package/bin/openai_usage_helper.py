@@ -429,11 +429,13 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter):
                 event_data["input_name"] = normalized_input_name
                 event_data["account"] = account_name
                 
+                event_time = event_data.get("_time")
                 event_writer.write_event(
                     smi.Event(
                         data=json.dumps(event_data, ensure_ascii=False, default=str),
                         index=input_item.get("index"),
                         sourcetype=sourcetype,
+                        time=event_time,
                     )
                 )
             
