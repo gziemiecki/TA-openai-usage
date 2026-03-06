@@ -9,12 +9,12 @@
         },
         "author": [
             {
-                "name": "",
+                "name": "gziemiecki",
                 "email": null,
                 "company": null
             }
         ],
-        "releaseDate": null,
+        "releaseDate": "2026-02-01",
         "description": "OpenAI API Usage Monitor",
         "classification": {
             "intendedAudience": "IT Professionals",
@@ -51,7 +51,6 @@
         "_search_head_clustering"
     ],
     "targetWorkloads": [
-        "_search_heads",
-        "_indexers"
+        "_search_heads"
     ]
 }
