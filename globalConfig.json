@@ -162,26 +162,102 @@
                             "type": "multipleSelect",
                             "label": "Models to Track",
                             "field": "models",
-                            "help": "Select which OpenAI models to track usage for. Select 'All Models' to track all available models.",
+                            "help": "Select which OpenAI models to track usage for. Defaults to All Models (*). Model IDs are matched against the model field returned by the OpenAI Usage API.",
                             "required": false,
-                            "defaultValue": "gpt-4,gpt-3.5-turbo",
+                            "defaultValue": "*",
                             "options": {
                                 "items": [
                                     {
-                                        "value": "gpt-4",
-                                        "label": "GPT-4"
+                                        "value": "*",
+                                        "label": "All Models"
+                                    },
+                                    {
+                                        "value": "gpt-5.4",
+                                        "label": "GPT-5.4"
+                                    },
+                                    {
+                                        "value": "gpt-5.4-pro",
+                                        "label": "GPT-5.4 Pro"
+                                    },
+                                    {
+                                        "value": "gpt-5.2",
+                                        "label": "GPT-5.2"
+                                    },
+                                    {
+                                        "value": "gpt-5.1",
+                                        "label": "GPT-5.1"
+                                    },
+                                    {
+                                        "value": "gpt-5",
+                                        "label": "GPT-5"
+                                    },
+                                    {
+                                        "value": "gpt-5-mini",
+                                        "label": "GPT-5 mini"
+                                    },
+                                    {
+                                        "value": "gpt-5-nano",
+                                        "label": "GPT-5 nano"
+                                    },
+                                    {
+                                        "value": "o3",
+                                        "label": "o3"
+                                    },
+                                    {
+                                        "value": "o4-mini",
+                                        "label": "o4-mini"
+                                    },
+                                    {
+                                        "value": "o3-mini",
+                                        "label": "o3-mini"
+                                    },
+                                    {
+                                        "value": "o1",
+                                        "label": "o1"
+                                    },
+                                    {
+                                        "value": "gpt-4.1",
+                                        "label": "GPT-4.1"
+                                    },
+                                    {
+                                        "value": "gpt-4.1-mini",
+                                        "label": "GPT-4.1 mini"
+                                    },
+                                    {
+                                        "value": "gpt-4.1-nano",
+                                        "label": "GPT-4.1 nano"
+                                    },
+                                    {
+                                        "value": "gpt-4o",
+                                        "label": "GPT-4o"
+                                    },
+                                    {
+                                        "value": "gpt-4o-mini",
+                                        "label": "GPT-4o mini"
+                                    },
+                                    {
+                                        "value": "text-embedding-3-large",
+                                        "label": "text-embedding-3-large"
+                                    },
+                                    {
+                                        "value": "text-embedding-3-small",
+                                        "label": "text-embedding-3-small"
+                                    },
+                                    {
+                                        "value": "text-embedding-ada-002",
+                                        "label": "text-embedding-ada-002"
                                     },
                                     {
                                         "value": "gpt-4-turbo",
-                                        "label": "GPT-4 Turbo"
+                                        "label": "GPT-4 Turbo (Legacy)"
+                                    },
+                                    {
+                                        "value": "gpt-4",
+                                        "label": "GPT-4 (Legacy)"
                                     },
                                     {
                                         "value": "gpt-3.5-turbo",
-                                        "label": "GPT-3.5 Turbo"
-                                    },
-                                    {
-                                        "value": "*",
-                                        "label": "All Models"
+                                        "label": "GPT-3.5 Turbo (Legacy)"
                                     }
                                 ],
                                 "delimiter": ","

@@ -70,7 +70,7 @@ $SPLUNK_HOME/bin/splunk restart
      - Index (default: main)
      - Account (select from dropdown)
      - Start Date (optional, YYYY-MM-DD)
-     - Models to Track (default: gpt-4, gpt-3.5-turbo)
+     - Models to Track (default: All Models)
 
 3. **Save and Enable**
 
@@ -101,12 +101,15 @@ index=_internal source=*openai_usage*
 - ✅ Index selection
 - ✅ Account selection (dropdown)
 - ✅ Optional start date (YYYY-MM-DD with regex validation)
-- ✅ Multi-select models:
-  - GPT-4
-  - GPT-4 Turbo
-  - GPT-3.5 Turbo
+- ✅ Multi-select models (default: All Models):
   - All Models (*)
-- ✅ Default models: gpt-4, gpt-3.5-turbo
+  - GPT-5.4, GPT-5.4 Pro, GPT-5.2, GPT-5.1, GPT-5 (GPT-5 series)
+  - GPT-5 mini, GPT-5 nano (efficient)
+  - o3, o4-mini, o3-mini, o1 (reasoning)
+  - GPT-4.1, GPT-4.1 mini, GPT-4.1 nano
+  - GPT-4o, GPT-4o mini
+  - text-embedding-3-large, text-embedding-3-small, text-embedding-ada-002 (embeddings)
+  - GPT-4 Turbo, GPT-4, GPT-3.5 Turbo (legacy)
 
 ### Python Helper Module
 - ✅ OpenAI SDK integration (openai>=1.0.0)

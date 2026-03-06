@@ -47,12 +47,36 @@ Create a new data input with the following parameters:
 - **Index:** Splunk index for storing usage data (default: main)
 - **Account:** Select the configured OpenAI account
 - **Start Date:** (Optional) Start date for collecting historical data (YYYY-MM-DD format)
-- **Models to Track:** Select which models to monitor:
-  - GPT-4
-  - GPT-4 Turbo
-  - GPT-3.5 Turbo
-  - All Models (*)
-  - Default: gpt-4, gpt-3.5-turbo
+- **Models to Track:** Select which models to monitor (default: All Models).
+  Model IDs are matched against the `model` field returned by the OpenAI Usage API,
+  so selecting a specific model will only include usage records where the API reports
+  that exact model ID. When in doubt, use **All Models** and filter in Splunk searches.
+
+  | Model | Series |
+  |---|---|
+  | All Models (*) | — |
+  | GPT-5.4 | GPT-5 Frontier |
+  | GPT-5.4 Pro | GPT-5 Frontier |
+  | GPT-5.2 | GPT-5 Frontier |
+  | GPT-5.1 | GPT-5 Frontier |
+  | GPT-5 | GPT-5 Frontier |
+  | GPT-5 mini | GPT-5 Efficient |
+  | GPT-5 nano | GPT-5 Efficient |
+  | o3 | Reasoning |
+  | o4-mini | Reasoning |
+  | o3-mini | Reasoning |
+  | o1 | Reasoning |
+  | GPT-4.1 | GPT-4.1 |
+  | GPT-4.1 mini | GPT-4.1 |
+  | GPT-4.1 nano | GPT-4.1 |
+  | GPT-4o | GPT-4o |
+  | GPT-4o mini | GPT-4o |
+  | text-embedding-3-large | Embeddings |
+  | text-embedding-3-small | Embeddings |
+  | text-embedding-ada-002 | Embeddings |
+  | GPT-4 Turbo (Legacy) | Legacy |
+  | GPT-4 (Legacy) | Legacy |
+  | GPT-3.5 Turbo (Legacy) | Legacy |
 
 ## Data Collection
 
@@ -62,37 +86,67 @@ Events are indexed with sourcetype: `openai:usage`
 
 ### Event Structure
 
+Each event represents one model's usage within a daily bucket returned by
+the OpenAI Usage API.
+
 ```json
 {
-  "timestamp": "2024-01-15T10:30:00Z",
-  "start_date": "2024-01-14T10:30:00Z",
-  "end_date": "2024-01-15T10:30:00Z",
-  "models_tracked": "gpt-4,gpt-3.5-turbo",
-  "status": "active",
-  "organization_id": "org-xxxxx",
-  "api_status": "connected",
+  "_time": 1741132800,
+  "timestamp": "2026-03-05T00:00:00+00:00",
+  "endpoint_type": "completions",
+  "model": "gpt-5.4",
+  "input_tokens": 84213,
+  "output_tokens": 19047,
+  "cached_tokens": 3200,
+  "requests": 142,
+  "project_id": "proj_abc123",
+  "api_key_id": "key_xyz789",
+  "bucket_start_time": 1741132800,
+  "bucket_end_time": 1741219200,
   "input_name": "my_openai_input",
   "account": "my_openai_account"
 }
 ```
 
+Error events include `"status": "error"` with `error`, `error_type`, and
+optionally `status_code` fields.
+
 ## Sample Searches
 
-### View all OpenAI usage events
+### View all usage events
 ```spl
-index=main sourcetype="openai:usage"
+index=main sourcetype="openai:usage" status!=error
+| table _time model endpoint_type input_tokens output_tokens cached_tokens requests
 ```
 
-### Count events by model
+### Total token usage by model
 ```spl
-index=main sourcetype="openai:usage" 
-| stats count by models_tracked
+index=main sourcetype="openai:usage" status!=error
+| stats sum(input_tokens) as input_tokens
+        sum(output_tokens) as output_tokens
+        sum(cached_tokens) as cached_tokens
+        sum(requests) as requests by model
+| eval total_tokens = input_tokens + output_tokens
+| sort -total_tokens
 ```
 
-### Monitor API errors
+### Compare completions vs embeddings usage
 ```spl
-index=main sourcetype="openai:usage" status=error 
-| table _time error error_type
+index=main sourcetype="openai:usage" status!=error
+| stats sum(input_tokens) as input sum(output_tokens) as output sum(requests) as calls
+        by endpoint_type
+```
+
+### Daily token trend for GPT-5.4
+```spl
+index=main sourcetype="openai:usage" model=gpt-5.4 status!=error
+| timechart span=1d sum(input_tokens) as input_tokens sum(output_tokens) as output_tokens
+```
+
+### Monitor errors and rate limits
+```spl
+index=main sourcetype="openai:usage" status=error
+| table _time endpoint_type error_type status_code error
 ```
 
 ## File Structure
