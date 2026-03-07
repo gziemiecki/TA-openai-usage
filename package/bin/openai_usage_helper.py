@@ -31,11 +31,53 @@ def get_account_details(session_key: str, account_name: str) -> Dict[str, str]:
     )
     account_conf_file = cfm.get_conf("ta-openai-usage_account")
     account_data = account_conf_file.get(account_name)
-    
+
     return {
         "api_key": account_data.get("api_key"),
         "organization_id": account_data.get("organization_id", "")
     }
+
+
+def get_proxy_settings(session_key: str, logger: logging.Logger) -> Optional[Dict[str, str]]:
+    """
+    Read proxy configuration written by UCC's proxyTab from the add-on
+    settings conf file and return a dict suitable for passing as the
+    ``proxies`` argument to ``requests.get()``.
+
+    Returns None when the proxy is disabled or not configured, so callers
+    can safely pass the result directly to requests without extra checks.
+    """
+    try:
+        cfm = conf_manager.ConfManager(session_key, ADDON_NAME)
+        settings = cfm.get_conf("ta-openai-usage_settings")
+        proxy = settings.get("proxy", {})
+
+        if str(proxy.get("proxy_enabled", "0")).strip() != "1":
+            return None
+
+        proxy_type = proxy.get("proxy_type", "http").strip() or "http"
+        proxy_url = proxy.get("proxy_url", "").strip()
+        proxy_port = proxy.get("proxy_port", "").strip()
+
+        if not proxy_url or not proxy_port:
+            logger.warning("Proxy enabled but proxy_url or proxy_port is missing; skipping proxy.")
+            return None
+
+        username = proxy.get("proxy_username", "").strip()
+        password = proxy.get("proxy_password", "").strip()
+
+        if username and password:
+            authority = f"{username}:{password}@{proxy_url}:{proxy_port}"
+        else:
+            authority = f"{proxy_url}:{proxy_port}"
+
+        proxy_uri = f"{proxy_type}://{authority}"
+        logger.info(f"Using proxy: {proxy_type}://{proxy_url}:{proxy_port}")
+        return {"http": proxy_uri, "https": proxy_uri}
+
+    except Exception as e:
+        logger.warning(f"Could not read proxy settings; proceeding without proxy: {e}")
+        return None
 
 
 def get_openai_usage_data(
@@ -45,6 +87,7 @@ def get_openai_usage_data(
     end_time: int,
     organization_id: Optional[str] = None,
     models: Optional[str] = None,
+    proxies: Optional[Dict[str, str]] = None,
 ) -> List[Dict]:
     """
     Fetch usage data from OpenAI Organization Usage API.
@@ -56,6 +99,9 @@ def get_openai_usage_data(
         end_time: End of collection window as a Unix timestamp (exclusive)
         organization_id: Optional OpenAI organization ID
         models: Comma-separated list of models to track, or '*' for all
+        proxies: Optional dict of proxy URIs keyed by scheme, e.g.
+                 {"http": "http://host:port", "https": "http://host:port"}.
+                 Pass the return value of get_proxy_settings() directly.
 
     Returns:
         List of usage data dictionaries formatted for Splunk ingestion.
@@ -123,7 +169,8 @@ def get_openai_usage_data(
                 start_time=start_time,
                 end_time=end_time,
                 endpoint_type=endpoint_type,
-                model_filter=model_filter
+                model_filter=model_filter,
+                proxies=proxies,
             )
             
             all_usage_data.extend(usage_records)
@@ -163,11 +210,12 @@ def fetch_usage_with_pagination(
     start_time: int,
     end_time: int,
     endpoint_type: str,
-    model_filter: Optional[List[str]] = None
+    model_filter: Optional[List[str]] = None,
+    proxies: Optional[Dict[str, str]] = None,
 ) -> List[Dict]:
     """
     Fetch usage data with pagination support.
-    
+
     Args:
         logger: Logger instance
         url: API endpoint URL
@@ -176,7 +224,8 @@ def fetch_usage_with_pagination(
         end_time: End Unix timestamp
         endpoint_type: Type of endpoint (completions or embeddings)
         model_filter: Optional list of models to filter
-        
+        proxies: Optional proxy dict passed through to requests.get()
+
     Returns:
         List of formatted usage records
     """
@@ -208,7 +257,13 @@ def fetch_usage_with_pagination(
             params["page"] = next_page
         
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=30)
+            response = requests.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=30,
+                proxies=proxies or {},
+            )
             
             # Handle specific HTTP error codes
             now_ts = int(datetime.now(timezone.utc).timestamp())
@@ -442,13 +497,14 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter):
                 continue
 
             # ----------------------------------------------------------------
-            # Account credentials
+            # Account credentials and proxy
             # ----------------------------------------------------------------
             account_name = input_item.get("account")
             account_details = get_account_details(session_key, account_name)
             api_key = account_details.get("api_key")
             organization_id = account_details.get("organization_id")
             models = input_item.get("models")
+            proxies = get_proxy_settings(session_key, logger)
 
             logger.info(f"Fetching OpenAI usage data for account: {account_name}")
             if organization_id:
@@ -466,6 +522,7 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter):
                 end_time=end_time,
                 organization_id=organization_id,
                 models=models,
+                proxies=proxies,
             )
 
             sourcetype = "openai:usage"

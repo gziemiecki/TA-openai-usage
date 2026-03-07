@@ -73,6 +73,9 @@
                     "title": "Accounts"
                 },
                 {
+                    "type": "proxyTab"
+                },
+                {
                     "type": "loggingTab"
                 }
             ],
