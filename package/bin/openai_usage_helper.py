@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
@@ -17,9 +18,31 @@ except ImportError:
 ADDON_NAME = "TA-openai-usage"
 # Maximum pages to fetch per endpoint per run to bound execution time
 MAX_PAGES = 50
+MAX_ERROR_DETAIL_LENGTH = 512
+
+PROXY_CREDENTIALS_RE = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<creds>[^/@:\s]+(?::[^/@\s]*)?@)")
 
 def logger_for_input(input_name: str) -> logging.Logger:
     return log.Logs().get_logger(f"{ADDON_NAME.lower()}_{input_name}")
+
+
+def redact_url_credentials(value: str) -> str:
+    """Redact credentials embedded in URLs before logging or indexing."""
+    if not value:
+        return value
+    return PROXY_CREDENTIALS_RE.sub(r"\g<scheme>***:***@", value)
+
+
+def sanitize_error_detail(detail: Optional[str]) -> str:
+    """Normalize and trim error details to avoid leaking sensitive upstream data."""
+    if not detail:
+        return "No additional error details provided."
+
+    sanitized = redact_url_credentials(str(detail)).replace("\r", " ").replace("\n", " ").strip()
+    sanitized = re.sub(r"\s+", " ", sanitized)
+    if len(sanitized) > MAX_ERROR_DETAIL_LENGTH:
+        sanitized = sanitized[:MAX_ERROR_DETAIL_LENGTH] + "... [truncated]"
+    return sanitized
 
 
 def get_account_details(session_key: str, account_name: str) -> Dict[str, str]:
@@ -76,7 +99,10 @@ def get_proxy_settings(session_key: str, logger: logging.Logger) -> Optional[Dic
         return {"http": proxy_uri, "https": proxy_uri}
 
     except Exception as e:
-        logger.warning(f"Could not read proxy settings; proceeding without proxy: {e}")
+        logger.warning(
+            "Could not read proxy settings; proceeding without proxy: "
+            f"{sanitize_error_detail(str(e))}"
+        )
         return None
 
 
@@ -177,13 +203,14 @@ def get_openai_usage_data(
             logger.info(f"Collected {len(usage_records)} {endpoint_type} usage records")
             
         except Exception as e:
-            logger.error(f"Error fetching {endpoint_type} usage data: {str(e)}")
+            sanitized_error = sanitize_error_detail(str(e))
+            logger.error(f"Error fetching {endpoint_type} usage data: {sanitized_error}")
             # Add error event but continue with remaining endpoints
             now_ts = int(datetime.now(timezone.utc).timestamp())
             all_usage_data.append({
                 "_time": now_ts,
                 "endpoint_type": endpoint_type,
-                "error": str(e),
+                "error": sanitized_error,
                 "error_type": type(e).__name__,
                 "status": "error"
             })
@@ -290,11 +317,18 @@ def fetch_usage_with_pagination(
                 }]
 
             elif response.status_code != 200:
-                logger.error(f"API request failed with status {response.status_code}: {response.text}")
+                response_detail = sanitize_error_detail(response.text)
+                logger.error(
+                    f"API request failed with status {response.status_code}. "
+                    f"Details: {response_detail}"
+                )
                 return [{
                     "_time": now_ts,
                     "endpoint_type": endpoint_type,
-                    "error": f"API request failed: {response.text}",
+                    "error": (
+                        f"API request failed with status {response.status_code}. "
+                        f"Details: {response_detail}"
+                    ),
                     "status_code": response.status_code,
                     "status": "error"
                 }]
@@ -378,22 +412,24 @@ def fetch_usage_with_pagination(
 
         except requests.exceptions.ConnectionError as e:
             now_ts = int(datetime.now(timezone.utc).timestamp())
-            logger.error(f"Network connection error for {endpoint_type}: {str(e)}")
+            sanitized_error = sanitize_error_detail(str(e))
+            logger.error(f"Network connection error for {endpoint_type}: {sanitized_error}")
             return [{
                 "_time": now_ts,
                 "endpoint_type": endpoint_type,
-                "error": f"Network connection error: {str(e)}",
+                "error": f"Network connection error: {sanitized_error}",
                 "error_type": "ConnectionError",
                 "status": "error"
             }]
 
         except Exception as e:
             now_ts = int(datetime.now(timezone.utc).timestamp())
-            logger.error(f"Unexpected error fetching {endpoint_type} data: {str(e)}")
+            sanitized_error = sanitize_error_detail(str(e))
+            logger.error(f"Unexpected error fetching {endpoint_type} data: {sanitized_error}")
             return [{
                 "_time": now_ts,
                 "endpoint_type": endpoint_type,
-                "error": f"Unexpected error: {str(e)}",
+                "error": f"Unexpected error: {sanitized_error}",
                 "error_type": type(e).__name__,
                 "status": "error"
             }]
