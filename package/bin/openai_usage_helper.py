@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
@@ -16,11 +17,18 @@ except ImportError:
 
 
 ADDON_NAME = "TA-openai-usage"
-# Maximum pages to fetch per endpoint per run to bound execution time
+BASE_URL = "https://api.openai.com/v1/organization/usage"
 MAX_PAGES = 50
 MAX_ERROR_DETAIL_LENGTH = 512
 
-PROXY_CREDENTIALS_RE = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<creds>[^/@:\s]+(?::[^/@\s]*)?@)")
+PROXY_CREDENTIALS_RE = re.compile(
+    r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<creds>[^/@:\s]+(?::[^/@\s]*)?@)"
+)
+
+
+# ---------------------------------------------------------------------------
+# Utility helpers
+# ---------------------------------------------------------------------------
 
 def logger_for_input(input_name: str) -> logging.Logger:
     return log.Logs().get_logger(f"{ADDON_NAME.lower()}_{input_name}")
@@ -37,7 +45,6 @@ def sanitize_error_detail(detail: Optional[str]) -> str:
     """Normalize and trim error details to avoid leaking sensitive upstream data."""
     if not detail:
         return "No additional error details provided."
-
     sanitized = redact_url_credentials(str(detail)).replace("\r", " ").replace("\n", " ").strip()
     sanitized = re.sub(r"\s+", " ", sanitized)
     if len(sanitized) > MAX_ERROR_DETAIL_LENGTH:
@@ -54,21 +61,18 @@ def get_account_details(session_key: str, account_name: str) -> Dict[str, str]:
     )
     account_conf_file = cfm.get_conf("ta-openai-usage_account")
     account_data = account_conf_file.get(account_name)
-
     return {
         "api_key": account_data.get("api_key"),
-        "organization_id": account_data.get("organization_id", "")
+        "organization_id": account_data.get("organization_id", ""),
     }
 
 
 def get_proxy_settings(session_key: str, logger: logging.Logger) -> Optional[Dict[str, str]]:
     """
-    Read proxy configuration written by UCC's proxyTab from the add-on
-    settings conf file and return a dict suitable for passing as the
-    ``proxies`` argument to ``requests.get()``.
+    Read proxy configuration from the add-on settings conf file and return a
+    dict suitable for passing as the ``proxies`` argument to ``requests.get()``.
 
-    Returns None when the proxy is disabled or not configured, so callers
-    can safely pass the result directly to requests without extra checks.
+    Returns None when the proxy is disabled or not configured.
     """
     try:
         cfm = conf_manager.ConfManager(session_key, ADDON_NAME)
@@ -106,157 +110,330 @@ def get_proxy_settings(session_key: str, logger: logging.Logger) -> Optional[Dic
         return None
 
 
-def get_openai_usage_data(
-    logger: logging.Logger,
-    api_key: str,
-    start_time: int,
-    end_time: int,
-    organization_id: Optional[str] = None,
-    models: Optional[str] = None,
-    proxies: Optional[Dict[str, str]] = None,
-) -> List[Dict]:
+# ---------------------------------------------------------------------------
+# Collector ABC
+# ---------------------------------------------------------------------------
+
+class UsageCollector(ABC):
     """
-    Fetch usage data from OpenAI Organization Usage API.
+    Base class for all OpenAI usage collectors.
 
-    Args:
-        logger: Logger instance
-        api_key: OpenAI API key (requires admin permissions)
-        start_time: Start of collection window as a Unix timestamp (inclusive)
-        end_time: End of collection window as a Unix timestamp (exclusive)
-        organization_id: Optional OpenAI organization ID
-        models: Comma-separated list of models to track, or '*' for all
-        proxies: Optional dict of proxy URIs keyed by scheme, e.g.
-                 {"http": "http://host:port", "https": "http://host:port"}.
-                 Pass the return value of get_proxy_settings() directly.
+    Each subclass represents one logical billing dimension from the OpenAI
+    Organization Usage API.  Subclasses MUST define the class-level
+    attributes ``endpoint_type`` and ``url``, and MUST implement
+    ``format_record()``.
 
-    Returns:
-        List of usage data dictionaries formatted for Splunk ingestion.
-        Records with status="error" indicate API or network failures.
+    Subclasses that need non-standard fetch behaviour (e.g. different query
+    parameters) should override ``collect()``.
     """
-    if requests is None:
-        logger.error("requests library is not installed. Please ensure requests>=2.31.0 is in requirements.txt")
-        return [{
-            "_time": int(datetime.now(timezone.utc).timestamp()),
-            "error": "requests library not available",
-            "error_type": "ImportError",
-            "status": "error"
-        }]
 
-    start_dt = datetime.fromtimestamp(start_time, tz=timezone.utc)
-    end_dt = datetime.fromtimestamp(end_time, tz=timezone.utc)
-    logger.info(
-        f"Fetching OpenAI usage data: {start_dt.isoformat()} to {end_dt.isoformat()} "
-        f"(Unix: {start_time} to {end_time})"
-    )
+    endpoint_type: str          # Used as the Splunk event field value
+    url: str                    # Full API endpoint URL
+    supports_model_filter: bool = True   # Set False for tool/storage endpoints
+    group_by: List[str] = ["model"]      # API group_by param; empty list omits it
 
-    # Parse models filter
-    model_filter = None
-    if models and models.strip():
-        model_filter = [m.strip() for m in models.split(",") if m.strip()]
-        if "*" in model_filter:
-            model_filter = None  # All models
-    
-    # Prepare headers
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
+    @abstractmethod
+    def format_record(self, record: Dict) -> Optional[Dict]:
+        """
+        Map a single raw API response record to a Splunk event dict.
+
+        Return None to silently skip the record.  This is used by collectors
+        that share a URL (e.g. AudioTranscription and AudioSpeech both hit
+        /audio but each owns a different model prefix).
+        """
+        ...
+
+    def collect(
+        self,
+        logger: logging.Logger,
+        headers: Dict[str, str],
+        start_time: int,
+        end_time: int,
+        model_filter: Optional[List[str]],
+        proxies: Optional[Dict[str, str]],
+    ) -> List[Dict]:
+        """Fetch and return all records for this collector's time window."""
+        return fetch_usage_with_pagination(
+            logger=logger,
+            collector=self,
+            headers=headers,
+            start_time=start_time,
+            end_time=end_time,
+            model_filter=model_filter,
+            proxies=proxies,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Shared formatting helper
+# ---------------------------------------------------------------------------
+
+def _base_event(record: Dict, endpoint_type: str) -> Dict:
+    """Build the common fields present in every event."""
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    record_ts = record.get("start_time", now_ts)
+    event: Dict = {
+        "_time": record_ts,
+        "timestamp": datetime.fromtimestamp(record_ts, tz=timezone.utc).isoformat(),
+        "endpoint_type": endpoint_type,
     }
-    
-    if organization_id:
-        headers["OpenAI-Organization"] = organization_id
-        logger.info(f"Using organization ID: {organization_id}")
-    
-    all_usage_data = []
-    
-    # API endpoints to fetch from
-    endpoints = [
-        {
-            "url": "https://api.openai.com/v1/organization/usage/completions",
-            "type": "completions"
-        },
-        {
-            "url": "https://api.openai.com/v1/organization/usage/embeddings",
-            "type": "embeddings"
-        }
-    ]
-    
-    # Fetch data from each endpoint
-    for endpoint_info in endpoints:
-        endpoint_url = endpoint_info["url"]
-        endpoint_type = endpoint_info["type"]
-        
-        logger.info(f"Fetching {endpoint_type} usage data from {endpoint_url}")
-        
-        try:
-            usage_records = fetch_usage_with_pagination(
-                logger=logger,
-                url=endpoint_url,
-                headers=headers,
-                start_time=start_time,
-                end_time=end_time,
-                endpoint_type=endpoint_type,
-                model_filter=model_filter,
-                proxies=proxies,
-            )
-            
-            all_usage_data.extend(usage_records)
-            logger.info(f"Collected {len(usage_records)} {endpoint_type} usage records")
-            
-        except Exception as e:
-            sanitized_error = sanitize_error_detail(str(e))
-            logger.error(f"Error fetching {endpoint_type} usage data: {sanitized_error}")
-            # Add error event but continue with remaining endpoints
-            now_ts = int(datetime.now(timezone.utc).timestamp())
-            all_usage_data.append({
-                "_time": now_ts,
-                "endpoint_type": endpoint_type,
-                "error": sanitized_error,
-                "error_type": type(e).__name__,
-                "status": "error"
-            })
+    if "model" in record:
+        event["model"] = record["model"]
+    for opt in ("project_id", "api_key_id", "model_id", "bucket_start_time", "bucket_end_time"):
+        if opt in record:
+            event[opt] = record[opt]
+    return event
 
-    if not all_usage_data:
-        logger.warning("No usage data collected from any endpoint")
-        now_ts = int(datetime.now(timezone.utc).timestamp())
-        return [{
-            "_time": now_ts,
-            "status": "no_data",
-            "message": "No usage data available for the specified time range",
-            "start_time": start_time,
-            "end_time": end_time
-        }]
 
-    logger.info(f"Successfully collected {len(all_usage_data)} total usage records")
-    return all_usage_data
+# ---------------------------------------------------------------------------
+# Concrete collector implementations
+# ---------------------------------------------------------------------------
 
+class CompletionsCollector(UsageCollector):
+    endpoint_type = "completions"
+    url = BASE_URL + "/completions"
+    supports_model_filter = True
+    group_by = ["model"]
+
+    def format_record(self, record: Dict) -> Optional[Dict]:
+        event = _base_event(record, self.endpoint_type)
+        event.update({
+            "input_tokens": record.get("input_tokens", 0),
+            "output_tokens": record.get("output_tokens", 0),
+            "cached_tokens": record.get("input_cached_tokens", 0),
+            "num_model_requests": record.get("num_model_requests", 0),
+        })
+        return event
+
+
+class EmbeddingsCollector(UsageCollector):
+    endpoint_type = "embeddings"
+    url = BASE_URL + "/embeddings"
+    supports_model_filter = True
+    group_by = ["model"]
+
+    def format_record(self, record: Dict) -> Optional[Dict]:
+        event = _base_event(record, self.endpoint_type)
+        event.update({
+            "input_tokens": record.get("input_tokens", 0),
+            "num_model_requests": record.get("num_model_requests", 0),
+        })
+        return event
+
+
+class ImagesCollector(UsageCollector):
+    endpoint_type = "images"
+    url = BASE_URL + "/images"
+    supports_model_filter = True
+    group_by = ["model"]
+
+    def format_record(self, record: Dict) -> Optional[Dict]:
+        event = _base_event(record, self.endpoint_type)
+        event.update({
+            "num_model_requests": record.get("num_model_requests", 0),
+            "num_images": record.get("num_images", 0),
+        })
+        if "size" in record:
+            event["size"] = record["size"]
+        if "quality" in record:
+            event["quality"] = record["quality"]
+        return event
+
+
+class AudioTranscriptionCollector(UsageCollector):
+    """
+    Collects Whisper (speech-to-text) usage from the /audio endpoint.
+
+    The /audio endpoint returns both Whisper and TTS records in the same
+    response.  This collector claims only the Whisper records (model prefix
+    ``whisper``); AudioSpeechCollector claims the TTS records.  Because both
+    collectors hit the same URL, the API is called twice per run — once per
+    collector.  This is intentional: the two billing dimensions (seconds vs.
+    characters) are distinct enough that conflating them in a single event
+    would make cost analysis misleading.
+    """
+    endpoint_type = "audio_transcription"
+    url = BASE_URL + "/audio"
+    supports_model_filter = True
+    group_by = ["model"]
+    _model_prefix = "whisper"
+
+    def format_record(self, record: Dict) -> Optional[Dict]:
+        if not record.get("model", "").startswith(self._model_prefix):
+            return None
+        event = _base_event(record, self.endpoint_type)
+        event.update({
+            "input_seconds": record.get("input_seconds", 0),
+            "num_model_requests": record.get("num_model_requests", 0),
+        })
+        return event
+
+
+class AudioSpeechCollector(UsageCollector):
+    """Collects TTS (text-to-speech) usage from the /audio endpoint."""
+    endpoint_type = "audio_speech"
+    url = BASE_URL + "/audio"
+    supports_model_filter = True
+    group_by = ["model"]
+    _model_prefix = "tts"
+
+    def format_record(self, record: Dict) -> Optional[Dict]:
+        if not record.get("model", "").startswith(self._model_prefix):
+            return None
+        event = _base_event(record, self.endpoint_type)
+        event.update({
+            "num_characters": record.get("num_characters", 0),
+            "num_model_requests": record.get("num_model_requests", 0),
+        })
+        return event
+
+
+class CodeInterpreterCollector(UsageCollector):
+    endpoint_type = "code_interpreter"
+    url = BASE_URL + "/code_interpreter"
+    supports_model_filter = False
+    group_by = []
+
+    def format_record(self, record: Dict) -> Optional[Dict]:
+        event = _base_event(record, self.endpoint_type)
+        event.update({
+            "num_sessions": record.get("num_sessions", 0),
+        })
+        return event
+
+
+class WebSearchCollector(UsageCollector):
+    endpoint_type = "web_search"
+    url = BASE_URL + "/web_search"
+    supports_model_filter = False
+    group_by = []
+
+    def format_record(self, record: Dict) -> Optional[Dict]:
+        event = _base_event(record, self.endpoint_type)
+        event.update({
+            "num_queries": record.get("num_queries", 0),
+            "context_tokens": record.get("context_tokens", 0),
+        })
+        return event
+
+
+class VectorStoresCollector(UsageCollector):
+    """
+    Collects vector store storage usage.
+
+    Vector store billing is per GB·day (a snapshot of bytes stored, not an
+    aggregation of requests).  This collector overrides ``collect()`` to omit
+    ``bucket_width`` from the request parameters because OpenAI returns storage
+    snapshots, not daily-bucketed request streams.
+    """
+    endpoint_type = "vector_stores"
+    url = BASE_URL + "/vector_stores"
+    supports_model_filter = False
+    group_by = []
+
+    def format_record(self, record: Dict) -> Optional[Dict]:
+        event = _base_event(record, self.endpoint_type)
+        event.update({
+            # API may return usage_bytes or bytes_stored depending on version
+            "bytes_stored": record.get("usage_bytes", record.get("bytes_stored", 0)),
+        })
+        return event
+
+    def collect(
+        self,
+        logger: logging.Logger,
+        headers: Dict[str, str],
+        start_time: int,
+        end_time: int,
+        model_filter: Optional[List[str]],
+        proxies: Optional[Dict[str, str]],
+    ) -> List[Dict]:
+        return fetch_usage_with_pagination(
+            logger=logger,
+            collector=self,
+            headers=headers,
+            start_time=start_time,
+            end_time=end_time,
+            model_filter=model_filter,
+            proxies=proxies,
+            omit_bucket_width=True,
+        )
+
+
+class FineTuningCollector(UsageCollector):
+    """
+    Collects fine-tuning training job usage.
+
+    Fine-tuning runs are often the single largest cost spike in an
+    organization's OpenAI bill and are tracked separately from inference.
+    """
+    endpoint_type = "fine_tuning"
+    url = BASE_URL + "/fine_tuning"
+    supports_model_filter = True
+    group_by = ["model"]
+
+    def format_record(self, record: Dict) -> Optional[Dict]:
+        event = _base_event(record, self.endpoint_type)
+        event.update({
+            "input_tokens": record.get("input_tokens", 0),
+            "output_tokens": record.get("output_tokens", 0),
+            "num_model_requests": record.get("num_model_requests", 0),
+        })
+        if "training_steps" in record:
+            event["training_steps"] = record["training_steps"]
+        return event
+
+
+# ---------------------------------------------------------------------------
+# Registry
+# ---------------------------------------------------------------------------
+
+COLLECTOR_REGISTRY: List[UsageCollector] = [
+    CompletionsCollector(),
+    EmbeddingsCollector(),
+    ImagesCollector(),
+    AudioTranscriptionCollector(),
+    AudioSpeechCollector(),
+    CodeInterpreterCollector(),
+    WebSearchCollector(),
+    VectorStoresCollector(),
+    FineTuningCollector(),
+]
+
+
+# ---------------------------------------------------------------------------
+# Core fetch logic
+# ---------------------------------------------------------------------------
 
 def fetch_usage_with_pagination(
     logger: logging.Logger,
-    url: str,
+    collector: UsageCollector,
     headers: Dict[str, str],
     start_time: int,
     end_time: int,
-    endpoint_type: str,
     model_filter: Optional[List[str]] = None,
     proxies: Optional[Dict[str, str]] = None,
+    omit_bucket_width: bool = False,
 ) -> List[Dict]:
     """
-    Fetch usage data with pagination support.
+    Paginate through an OpenAI usage endpoint and return formatted records.
 
     Args:
-        logger: Logger instance
-        url: API endpoint URL
-        headers: HTTP headers including authorization
-        start_time: Start Unix timestamp
-        end_time: End Unix timestamp
-        endpoint_type: Type of endpoint (completions or embeddings)
-        model_filter: Optional list of models to filter
-        proxies: Optional proxy dict passed through to requests.get()
+        logger:            Logger instance.
+        collector:         The UsageCollector instance driving this fetch.
+        headers:           HTTP headers including authorization.
+        start_time:        Start of collection window as a Unix timestamp.
+        end_time:          End of collection window as a Unix timestamp.
+        model_filter:      Optional allowlist of model IDs; None means all models.
+        proxies:           Optional proxy dict for requests.
+        omit_bucket_width: When True, the ``bucket_width`` param is not sent
+                           (used by VectorStoresCollector).
 
     Returns:
-        List of formatted usage records
+        List of formatted event dicts.  Error dicts have ``status="error"``.
     """
-    all_records = []
+    endpoint_type = collector.endpoint_type
+    all_records: List[Dict] = []
     next_page = None
     page_count = 0
 
@@ -268,32 +445,32 @@ def fetch_usage_with_pagination(
                 "Remaining pages will be collected on the next run."
             )
             break
+
         logger.info(f"Fetching page {page_count} from {endpoint_type} endpoint")
-        
-        # Build request parameters
-        params = {
+
+        params: Dict = {
             "start_time": start_time,
             "end_time": end_time,
-            "bucket_width": "1d",
-            "group_by": ["model"],
-            "limit": 100
+            "limit": 100,
         }
-        
-        # Add next_page cursor if available
+        if not omit_bucket_width:
+            params["bucket_width"] = "1d"
+        if collector.group_by:
+            params["group_by"] = collector.group_by
         if next_page:
             params["page"] = next_page
-        
+
         try:
             response = requests.get(
-                url,
+                collector.url,
                 headers=headers,
                 params=params,
                 timeout=30,
                 proxies=proxies or {},
             )
-            
-            # Handle specific HTTP error codes
+
             now_ts = int(datetime.now(timezone.utc).timestamp())
+
             if response.status_code == 401:
                 logger.error("Invalid or insufficient API key permissions (admin key required)")
                 return [{
@@ -301,10 +478,10 @@ def fetch_usage_with_pagination(
                     "endpoint_type": endpoint_type,
                     "error": "Invalid or insufficient API key permissions - admin key required for usage API",
                     "status_code": 401,
-                    "status": "error"
+                    "status": "error",
                 }]
 
-            elif response.status_code == 429:
+            if response.status_code == 429:
                 retry_after = response.headers.get("Retry-After", "unknown")
                 logger.error(f"Rate limit hit. Retry after: {retry_after} seconds")
                 return [{
@@ -313,10 +490,10 @@ def fetch_usage_with_pagination(
                     "error": f"Rate limit exceeded. Retry after: {retry_after}",
                     "retry_after": retry_after,
                     "status_code": 429,
-                    "status": "error"
+                    "status": "error",
                 }]
 
-            elif response.status_code != 200:
+            if response.status_code != 200:
                 response_detail = sanitize_error_detail(response.text)
                 logger.error(
                     f"API request failed with status {response.status_code}. "
@@ -325,15 +502,11 @@ def fetch_usage_with_pagination(
                 return [{
                     "_time": now_ts,
                     "endpoint_type": endpoint_type,
-                    "error": (
-                        f"API request failed with status {response.status_code}. "
-                        f"Details: {response_detail}"
-                    ),
+                    "error": f"API request failed with status {response.status_code}. Details: {response_detail}",
                     "status_code": response.status_code,
-                    "status": "error"
+                    "status": "error",
                 }]
 
-            # Parse response
             try:
                 data = response.json()
             except json.JSONDecodeError as e:
@@ -342,63 +515,30 @@ def fetch_usage_with_pagination(
                     "_time": now_ts,
                     "endpoint_type": endpoint_type,
                     "error": f"Invalid JSON response: {str(e)}",
-                    "status": "error"
+                    "status": "error",
                 }]
-            
-            # Extract usage records from response
+
             records = data.get("data", [])
             logger.info(f"Received {len(records)} records in page {page_count}")
-            
-            # Process each usage record
+
             for record in records:
-                # Apply model filter if specified
-                model_name = record.get("model", "unknown")
-                if model_filter and model_name not in model_filter:
-                    continue
-                
-                # Format record for Splunk ingestion
-                now_ts = int(datetime.now(timezone.utc).timestamp())
-                record_ts = record.get("start_time", now_ts)
-                formatted_record = {
-                    "_time": record_ts,
-                    "timestamp": datetime.fromtimestamp(record_ts, tz=timezone.utc).isoformat(),
-                    "endpoint_type": endpoint_type,
-                    "model": model_name,
-                    "input_tokens": record.get("input_tokens", 0),
-                    "output_tokens": record.get("output_tokens", 0),
-                    "cached_tokens": record.get("input_cached_tokens", 0),
-                    "requests": record.get("num_model_requests", 0),
-                }
-                
-                # Add optional fields if present
-                if "project_id" in record:
-                    formatted_record["project_id"] = record["project_id"]
-                
-                if "api_key_id" in record:
-                    formatted_record["api_key_id"] = record["api_key_id"]
-                
-                if "model_id" in record:
-                    formatted_record["model_id"] = record["model_id"]
-                
-                # Add bucket information
-                if "bucket_start_time" in record:
-                    formatted_record["bucket_start_time"] = record["bucket_start_time"]
-                
-                if "bucket_end_time" in record:
-                    formatted_record["bucket_end_time"] = record["bucket_end_time"]
-                
-                all_records.append(formatted_record)
-            
-            # Check for pagination
+                if collector.supports_model_filter and model_filter is not None:
+                    if record.get("model", "") not in model_filter:
+                        continue
+
+                formatted = collector.format_record(record)
+                if formatted is not None:
+                    all_records.append(formatted)
+
             has_more = data.get("has_more", False)
             next_page = data.get("next_page")
-            
+
             if not has_more or not next_page:
                 logger.info(f"Pagination complete for {endpoint_type}. Total pages: {page_count}")
                 break
-            
+
             logger.info(f"More pages available. Next page cursor: {next_page}")
-            
+
         except requests.exceptions.Timeout:
             now_ts = int(datetime.now(timezone.utc).timestamp())
             logger.error(f"Request timeout after 30 seconds for {endpoint_type}")
@@ -407,7 +547,7 @@ def fetch_usage_with_pagination(
                 "endpoint_type": endpoint_type,
                 "error": "Request timeout after 30 seconds",
                 "error_type": "Timeout",
-                "status": "error"
+                "status": "error",
             }]
 
         except requests.exceptions.ConnectionError as e:
@@ -419,7 +559,7 @@ def fetch_usage_with_pagination(
                 "endpoint_type": endpoint_type,
                 "error": f"Network connection error: {sanitized_error}",
                 "error_type": "ConnectionError",
-                "status": "error"
+                "status": "error",
             }]
 
         except Exception as e:
@@ -431,11 +571,117 @@ def fetch_usage_with_pagination(
                 "endpoint_type": endpoint_type,
                 "error": f"Unexpected error: {sanitized_error}",
                 "error_type": type(e).__name__,
-                "status": "error"
+                "status": "error",
             }]
-    
+
     return all_records
 
+
+def get_openai_usage_data(
+    logger: logging.Logger,
+    api_key: str,
+    start_time: int,
+    end_time: int,
+    organization_id: Optional[str] = None,
+    models: Optional[str] = None,
+    proxies: Optional[Dict[str, str]] = None,
+) -> List[Dict]:
+    """
+    Collect usage data from all registered OpenAI usage collectors.
+
+    Args:
+        logger:          Logger instance.
+        api_key:         OpenAI API key (requires admin permissions).
+        start_time:      Start of collection window as a Unix timestamp (inclusive).
+        end_time:        End of collection window as a Unix timestamp (exclusive).
+        organization_id: Optional OpenAI organization ID.
+        models:          Comma-separated model IDs, or '*' / empty for all models.
+                         Model IDs not in the dropdown can be supplied here.
+        proxies:         Optional proxy dict from get_proxy_settings().
+
+    Returns:
+        List of usage event dicts.  Events with ``status="error"`` indicate
+        API or network failures for a specific collector; other collectors
+        continue to run.
+    """
+    if requests is None:
+        logger.error(
+            "requests library is not installed. "
+            "Please ensure requests>=2.31.0 is in requirements.txt"
+        )
+        return [{
+            "_time": int(datetime.now(timezone.utc).timestamp()),
+            "error": "requests library not available",
+            "error_type": "ImportError",
+            "status": "error",
+        }]
+
+    start_dt = datetime.fromtimestamp(start_time, tz=timezone.utc)
+    end_dt = datetime.fromtimestamp(end_time, tz=timezone.utc)
+    logger.info(
+        f"Fetching OpenAI usage data: {start_dt.isoformat()} to {end_dt.isoformat()} "
+        f"(Unix: {start_time} to {end_time})"
+    )
+
+    model_filter: Optional[List[str]] = None
+    if models and models.strip():
+        candidates = [m.strip() for m in models.split(",") if m.strip()]
+        if "*" not in candidates:
+            model_filter = candidates
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if organization_id:
+        headers["OpenAI-Organization"] = organization_id
+        logger.info(f"Using organization ID: {organization_id}")
+
+    all_usage_data: List[Dict] = []
+
+    for collector in COLLECTOR_REGISTRY:
+        logger.info(f"Fetching {collector.endpoint_type} usage data from {collector.url}")
+        try:
+            records = collector.collect(
+                logger=logger,
+                headers=headers,
+                start_time=start_time,
+                end_time=end_time,
+                model_filter=model_filter,
+                proxies=proxies,
+            )
+            all_usage_data.extend(records)
+            logger.info(f"Collected {len(records)} {collector.endpoint_type} usage records")
+        except Exception as e:
+            sanitized_error = sanitize_error_detail(str(e))
+            logger.error(f"Error fetching {collector.endpoint_type} usage data: {sanitized_error}")
+            now_ts = int(datetime.now(timezone.utc).timestamp())
+            all_usage_data.append({
+                "_time": now_ts,
+                "endpoint_type": collector.endpoint_type,
+                "error": sanitized_error,
+                "error_type": type(e).__name__,
+                "status": "error",
+            })
+
+    if not all_usage_data:
+        logger.warning("No usage data collected from any endpoint")
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        return [{
+            "_time": now_ts,
+            "status": "no_data",
+            "message": "No usage data available for the specified time range",
+            "start_time": start_time,
+            "end_time": end_time,
+        }]
+
+    logger.info(f"Successfully collected {len(all_usage_data)} total usage records")
+    return all_usage_data
+
+
+# ---------------------------------------------------------------------------
+# Splunk modular input entry points
+# ---------------------------------------------------------------------------
 
 def validate_input(definition: smi.ValidationDefinition):
     return
@@ -462,7 +708,6 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter):
         try:
             session_key = inputs.metadata["session_key"]
 
-            # Set log level from configuration
             log_level = conf_manager.get_log_level(
                 logger=logger,
                 session_key=session_key,
@@ -477,8 +722,6 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter):
             # ----------------------------------------------------------------
             checkpoint_dir = inputs.metadata.get("checkpoint_dir", "")
             if not checkpoint_dir:
-                # Fall back to a path alongside the add-on if Splunk doesn't
-                # provide the directory (e.g. during local testing).
                 checkpoint_dir = os.path.join(
                     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     "var", "modinputs", ADDON_NAME,
@@ -486,7 +729,6 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter):
             os.makedirs(checkpoint_dir, exist_ok=True)
 
             ckpt = checkpointer.FileCheckpointer(checkpoint_dir)
-            # Key is unique per input stanza so multiple inputs don't collide
             checkpoint_key = f"openai_usage_{normalized_input_name}"
 
             # ----------------------------------------------------------------
@@ -504,7 +746,6 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter):
                     f"{datetime.fromtimestamp(start_time, tz=timezone.utc).isoformat()}"
                 )
             else:
-                # First ever run for this input stanza
                 start_date = input_item.get("start_date", "").strip()
                 if start_date:
                     try:
@@ -521,9 +762,10 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter):
                         start_time = int((now_utc - timedelta(days=1)).timestamp())
                 else:
                     start_time = int((now_utc - timedelta(days=1)).timestamp())
-                    logger.info("First run: no checkpoint or start_date found, defaulting to last 24 hours")
+                    logger.info(
+                        "First run: no checkpoint or start_date found, defaulting to last 24 hours"
+                    )
 
-            # Safety guard: never request a window where start >= end
             if start_time >= end_time:
                 logger.info(
                     "Collection window is zero-width (start_time >= end_time). "
@@ -539,8 +781,19 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter):
             account_details = get_account_details(session_key, account_name)
             api_key = account_details.get("api_key")
             organization_id = account_details.get("organization_id")
-            models = input_item.get("models")
             proxies = get_proxy_settings(session_key, logger)
+
+            # Merge multiselect models with any additional free-text model IDs
+            models = input_item.get("models", "")
+            custom_models_str = input_item.get("custom_models", "").strip()
+            if custom_models_str:
+                extra_ids = [m.strip() for m in custom_models_str.split(",") if m.strip()]
+                if extra_ids:
+                    if models and models.strip() and models.strip() != "*":
+                        models = f"{models},{','.join(extra_ids)}"
+                    # If '*' (all models) is selected, custom_models has no further
+                    # effect since the filter is already open — no action needed.
+                    logger.info(f"Including additional model IDs from custom_models: {extra_ids}")
 
             logger.info(f"Fetching OpenAI usage data for account: {account_name}")
             if organization_id:
@@ -580,9 +833,7 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter):
                     events_written += 1
 
             # ----------------------------------------------------------------
-            # Advance checkpoint only on (partial) success.
-            # If every returned event is an error, leave the checkpoint alone
-            # so the same window is retried on the next poll cycle.
+            # Advance checkpoint only on (partial) success
             # ----------------------------------------------------------------
             if events_written > 0:
                 ckpt.update(checkpoint_key, end_time)
@@ -611,5 +862,8 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter):
                 logger,
                 e,
                 "openai_usage_error",
-                msg_before=f"Exception raised while ingesting OpenAI usage data for {normalized_input_name}: ",
+                msg_before=(
+                    f"Exception raised while ingesting OpenAI usage data "
+                    f"for {normalized_input_name}: "
+                ),
             )
