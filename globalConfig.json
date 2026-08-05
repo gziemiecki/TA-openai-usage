@@ -304,6 +304,34 @@
                                     "maxLength": 2000
                                 }
                             ]
+                        },
+                        {
+                            "type": "multipleSelect",
+                            "label": "Attribution Dimensions",
+                            "field": "group_by",
+                            "help": "Break usage down by these dimensions in addition to model. These are the only handles OpenAI exposes for attributing spend to something inside your organisation, so what you can answer later depends on how projects and keys are provisioned now. Each dimension multiplies the number of records returned. Dimensions an endpoint does not support are skipped for that endpoint.",
+                            "required": false,
+                            "options": {
+                                "delimiter": ",",
+                                "items": [
+                                    {
+                                        "value": "project_id",
+                                        "label": "Project"
+                                    },
+                                    {
+                                        "value": "user_id",
+                                        "label": "User"
+                                    },
+                                    {
+                                        "value": "api_key_id",
+                                        "label": "API Key"
+                                    },
+                                    {
+                                        "value": "vector_store_id",
+                                        "label": "Vector Store (file search only)"
+                                    }
+                                ]
+                            }
                         }
                     ],
                     "inputHelperModule": "openai_usage_helper",
@@ -387,7 +415,7 @@
     "meta": {
         "name": "TA-openai-usage",
         "restRoot": "TA-openai-usage",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "displayName": "OpenAI API Usage Monitor",
         "schemaVersion": "0.0.10",
         "supportedThemes": [

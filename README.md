@@ -11,16 +11,25 @@ every billable endpoint, including:
 - **Completions** — token usage and request counts for chat/text models
 - **Embeddings** — token usage for embedding models
 - **Images** — image generation counts and sizes (GPT Image 1, DALL-E)
-- **Audio Transcription** — Whisper speech-to-text duration in seconds
+- **Audio Transcription** — speech-to-text duration in seconds
 - **Audio Speech** — TTS character counts
-- **Code Interpreter** — session counts for Agents API usage
-- **Web Search** — query counts and context tokens
-- **Vector Stores** — storage snapshots in bytes (GB·day billing)
-- **Fine-Tuning** — training token usage and job counts
+- **Moderations** — moderation token counts
+- **Code Interpreter** — session counts
+- **Web Search** — search call counts by context level
+- **File Search** — search call counts by vector store
+- **Vector Stores** — storage snapshots in bytes (GB-day billing)
+
+It also collects **billed cost** from `/v1/organization/costs`, which is the
+only endpoint that reports money rather than quantities.
+
+Usage can be attributed by project, user, API key and vector store, not just
+by model.  Those are the only dimensions OpenAI exposes, which means the
+granularity of any later cost question is set by how projects and keys are
+provisioned now.
 
 ## Version
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 ## Installation
 
@@ -76,8 +85,8 @@ Create a new data input with the following parameters:
   | GPT-4.1 | GPT-4.1 | completions |
   | GPT-4.1 mini | GPT-4.1 | completions |
   | GPT-4.1 nano | GPT-4.1 | completions |
-  | GPT-4o | GPT-4o | completions, fine_tuning |
-  | GPT-4o mini | GPT-4o | completions, fine_tuning |
+  | GPT-4o | GPT-4o | completions |
+  | GPT-4o mini | GPT-4o | completions |
   | text-embedding-3-large | Embeddings | embeddings |
   | text-embedding-3-small | Embeddings | embeddings |
   | text-embedding-ada-002 | Embeddings | embeddings |
@@ -89,13 +98,28 @@ Create a new data input with the following parameters:
   | TTS-1 HD | Audio | audio_speech |
   | GPT-4 Turbo (Legacy) | Legacy | completions |
   | GPT-4 (Legacy) | Legacy | completions |
-  | GPT-3.5 Turbo (Legacy) | Legacy | completions, fine_tuning |
+  | GPT-3.5 Turbo (Legacy) | Legacy | completions |
 
 - **Additional Model IDs:** Free-text field for model IDs not in the dropdown
   above (e.g. `gpt-4o-2024-11-20`, `ft:gpt-4o:my-org:my-model:abc123`).
   Enter as a comma-separated list. These are merged with the **Models to Track**
   selection. If **All Models** is selected this field has no effect (all models
   already pass through).
+
+- **Attribution Dimensions:** (Optional) Break usage down by `project_id`,
+  `user_id`, `api_key_id` and `vector_store_id` in addition to model.
+
+  These four are the only handles OpenAI gives you for attributing spend to
+  something inside your organisation. There is no way to tag a request with a
+  cost centre, a team, or a customer after the fact, so whichever of these you
+  can answer with is decided when projects and keys are provisioned, not when
+  someone asks who spent the money.
+
+  Each dimension multiplies the number of records returned, so selecting all
+  four on a busy organisation means considerably more events. Dimensions an
+  endpoint does not support are skipped for that endpoint rather than sent:
+  `code_interpreter` and `vector_stores` accept only `project_id`, and
+  `vector_store_id` applies only to `file_search`.
 
 ## Data Collection
 
@@ -115,8 +139,9 @@ Every event includes these common fields:
 | `model` | Model ID as returned by the API (present on model-grouped endpoints) |
 | `input_name` | Name of the Splunk data input that collected this event |
 | `account` | Name of the OpenAI account used |
-| `project_id` | OpenAI project ID (when returned by the API) |
-| `api_key_id` | OpenAI API key ID (when returned by the API) |
+| `project_id` | OpenAI project ID (when requested via Attribution Dimensions) |
+| `user_id` | OpenAI user ID (when requested via Attribution Dimensions) |
+| `api_key_id` | OpenAI API key ID (when requested via Attribution Dimensions) |
 | `bucket_start_time` | Start of the daily bucket as a Unix timestamp |
 | `bucket_end_time` | End of the daily bucket as a Unix timestamp |
 
@@ -142,7 +167,7 @@ Endpoint-specific fields:
 | `num_images` | Number of images generated |
 | `num_model_requests` | Number of API requests |
 | `size` | Image dimensions (e.g. `1024x1024`) |
-| `quality` | Image quality setting (e.g. `standard`, `hd`) |
+| `source` | What produced the image (e.g. `image.generation`) |
 
 #### `audio_transcription` (Whisper)
 | Field | Description |
@@ -164,30 +189,60 @@ Endpoint-specific fields:
 #### `web_search`
 | Field | Description |
 |---|---|
-| `num_queries` | Number of web search queries |
-| `context_tokens` | Tokens consumed by search context |
+| `num_requests` | Number of web search calls |
+| `num_model_requests` | Number of API requests that made them |
+| `context_level` | Search context size (`low`, `medium`, `high`); pricing varies by this |
 
 #### `vector_stores`
 | Field | Description |
 |---|---|
 | `bytes_stored` | Bytes of vector store data stored (snapshot, not request-based) |
 
-#### `fine_tuning`
+#### `moderations`
 | Field | Description |
 |---|---|
-| `input_tokens` | Training input tokens consumed |
-| `output_tokens` | Training output tokens generated |
-| `num_model_requests` | Number of fine-tuning jobs |
-| `training_steps` | Number of training steps (when returned by the API) |
+| `input_tokens` | Tokens submitted for moderation |
+| `num_model_requests` | Number of API requests |
+
+#### `file_search`
+| Field | Description |
+|---|---|
+| `num_requests` | Number of file search calls |
+| `vector_store_id` | Vector store searched (when grouped by it) |
+
+#### `costs`
+| Field | Description |
+|---|---|
+| `cost_usd` | Amount OpenAI billed for this bucket |
+| `currency` | ISO-4217 currency code, lowercase (e.g. `usd`) |
+| `line_item` | Billing line item (e.g. `Image models`) |
+| `quantity` | Billed quantity for the line item |
 
 Error events include `"status": "error"` with `error`, `error_type`, and
-optionally `status_code` and `retry_after` fields.
+optionally `status_code` and `retry_after` fields.  Successful events carry
+no `status` field at all, so filter them with `NOT status=error` rather than
+`status!=error` — an SPL field comparison does not match events where the
+field is absent.
 
-## Cost Enrichment
+## Cost: Billed vs Estimated
 
-This add-on ships with a cost lookup table at
-`lookups/openai_model_costs.csv`.  Use it to estimate spend directly in
-Splunk searches without leaving the platform.
+There are two ways to get a cost number out of this add-on, and they are not
+interchangeable.
+
+**Billed cost** comes from `endpoint_type=costs`, collected from
+`/v1/organization/costs`.  It is what OpenAI actually charged, in currency,
+broken down by line item and project.  Use it for anything that reaches a
+finance conversation.  It has no per-model breakdown, because the costs
+endpoint does not provide one.
+
+**Estimated cost** is computed in SPL by multiplying usage quantities by the
+`lookups/openai_model_costs.csv` price list.  It gives you per-model
+attribution, which is usually the question people actually have, at the price
+of being a local copy of OpenAI's pricing that goes stale silently.
+
+Run the `OpenAI Cost - Estimated vs Billed Reconciliation` saved search to see
+the gap between the two.  A drift that grows over time means the CSV needs
+updating.
 
 ### Lookup fields
 
@@ -204,7 +259,7 @@ Splunk searches without leaving the platform.
 ### Cost enrichment pattern
 
 ```spl
-index=* sourcetype="openai:usage" endpoint_type=completions status!=error
+`openai_usage_ok` endpoint_type=completions
 | lookup openai_model_costs model endpoint_type
     OUTPUT cost_per_input_unit_usd cost_per_output_unit_usd
 | eval estimated_cost_usd =
@@ -222,10 +277,7 @@ For other endpoint types, replace the metric field to match the billing unit:
 | `images` | `num_images` | `num_images * cost_per_input_unit_usd` |
 | `audio_transcription` | `input_seconds` | `input_seconds * cost_per_input_unit_usd` |
 | `audio_speech` | `num_characters` | `num_characters * cost_per_input_unit_usd` |
-| `code_interpreter` | `num_sessions` | `num_sessions * 0.03` |
-| `web_search` | `num_queries` | `num_queries * 0.03` |
-| `vector_stores` | `bytes_stored` | `bytes_stored * 0.0000001` |
-| `fine_tuning` | `input_tokens`, `output_tokens` | `(input_tokens * cost_per_input_unit_usd) + (output_tokens * cost_per_output_unit_usd)` |
+
 
 > **Note:** Pricing in `openai_model_costs.csv` reflects OpenAI list prices as
 > of the TA release date.  Update the CSV when OpenAI changes pricing or
@@ -239,68 +291,69 @@ Reports, and Alerts.
 
 | Search name | What it produces |
 |---|---|
+| OpenAI Cost - Billed Daily by Line Item | Actual billed cost by line item |
+| OpenAI Cost - Billed Daily by Project | Actual billed cost by project |
 | OpenAI Usage - Completions Daily Summary | Token counts and estimated cost by model |
 | OpenAI Usage - Embeddings Daily Summary | Token counts and estimated cost by model |
 | OpenAI Usage - Images Daily Summary | Image counts and estimated cost by model |
 | OpenAI Usage - Audio Transcription Daily Summary | Duration (seconds/minutes) and estimated cost |
 | OpenAI Usage - Audio Speech Daily Summary | Character counts and estimated cost by model |
-| OpenAI Usage - Code Interpreter Daily Summary | Session counts and estimated cost |
-| OpenAI Usage - Web Search Daily Summary | Query counts, context tokens, and estimated cost |
-| OpenAI Usage - Vector Stores Daily Summary | Peak bytes stored and estimated GB·day cost |
-| OpenAI Usage - Fine-Tuning Daily Summary | Training token counts and estimated cost by model |
-| OpenAI Usage - Total Daily Cost by Endpoint | Cross-endpoint cost roll-up in a single timechart |
+| OpenAI Usage - Moderations Daily Summary | Moderation token counts by model |
+| OpenAI Usage - Code Interpreter Daily Summary | Session counts |
+| OpenAI Usage - Web Search Daily Summary | Search call counts by context level |
+| OpenAI Usage - File Search Daily Summary | Search call counts by vector store |
+| OpenAI Usage - Vector Store Storage Daily Summary | Peak bytes stored |
+| OpenAI Cost - Estimated vs Billed Reconciliation | Drift between the local price list and the real bill |
+
+All searches read through the `openai_usage_index` macro.  Point that at your
+index once in `default/macros.conf` instead of editing each search.
 
 ## Sample Searches
 
 ### View all usage events
 ```spl
-index=main sourcetype="openai:usage" status!=error
+`openai_usage_ok`
 | table _time endpoint_type model input_tokens output_tokens num_model_requests
 ```
 
-### Full cost roll-up across all endpoints
+### What OpenAI actually billed
 ```spl
-index=main sourcetype="openai:usage" status!=error
-| lookup openai_model_costs model endpoint_type
-    OUTPUT input_unit cost_per_input_unit_usd output_unit cost_per_output_unit_usd
-| eval estimated_cost_usd = case(
-    endpoint_type="completions",         round((input_tokens * cost_per_input_unit_usd) + (output_tokens * cost_per_output_unit_usd), 6),
-    endpoint_type="embeddings",          round(input_tokens * cost_per_input_unit_usd, 6),
-    endpoint_type="images",              round(num_images * cost_per_input_unit_usd, 6),
-    endpoint_type="audio_transcription", round(input_seconds * cost_per_input_unit_usd, 6),
-    endpoint_type="audio_speech",        round(num_characters * cost_per_input_unit_usd, 6),
-    endpoint_type="code_interpreter",    round(num_sessions * 0.03, 6),
-    endpoint_type="web_search",          round(num_queries * 0.03, 6),
-    endpoint_type="vector_stores",       round(bytes_stored * 0.0000001, 6),
-    endpoint_type="fine_tuning",         round((input_tokens * cost_per_input_unit_usd) + (output_tokens * cost_per_output_unit_usd), 6),
-    true(), 0)
-| stats sum(estimated_cost_usd) as total_estimated_cost_usd by endpoint_type
-| sort -total_estimated_cost_usd
+`openai_costs_ok`
+| stats sum(cost_usd) as billed_cost_usd by line_item
+| sort -billed_cost_usd
+```
+
+### Spend by project
+Requires `project_id` in the input's Attribution Dimensions.
+```spl
+`openai_costs_ok`
+| stats sum(cost_usd) as billed_cost_usd by project_id
+| sort -billed_cost_usd
 ```
 
 ### Token usage trend for a specific model
 ```spl
-index=main sourcetype="openai:usage" endpoint_type=completions model=gpt-4o status!=error
+`openai_usage_ok` endpoint_type=completions model=gpt-4o
 | timechart span=1d sum(input_tokens) as input_tokens sum(output_tokens) as output_tokens
 ```
 
 ### Vector store storage trend (GB)
 ```spl
-index=main sourcetype="openai:usage" endpoint_type=vector_stores status!=error
+`openai_usage_ok` endpoint_type=vector_stores
 | eval bytes_stored_gb = round(bytes_stored / 1073741824, 4)
 | timechart span=1d max(bytes_stored_gb) as peak_gb_stored
 ```
 
 ### Audio transcription minutes per day
 ```spl
-index=main sourcetype="openai:usage" endpoint_type=audio_transcription status!=error
+`openai_usage_ok` endpoint_type=audio_transcription
 | eval input_minutes = round(input_seconds / 60, 2)
 | timechart span=1d sum(input_minutes) as total_minutes by model
 ```
 
 ### Monitor errors and rate limits
 ```spl
-index=main sourcetype="openai:usage" status=error
+`openai_usage_index` sourcetype="openai:usage" status=error
 | table _time endpoint_type error_type status_code error
 ```
 
@@ -428,7 +481,7 @@ index=_internal source=*openai_usage*
    - Review internal logs for error messages
 
 2. **Partial data (some endpoint types missing):**
-   - Some endpoints (e.g. `vector_stores`, `fine_tuning`) may return HTTP 404
+   - Some endpoints may return HTTP 404
      if your organization has never used that feature — this is expected and
      logged as a warning, not an error
    - Check internal logs for per-endpoint error messages
@@ -452,11 +505,79 @@ For issues, questions, or contributions:
 - Check UCC framework documentation: https://splunk.github.io/addonfactory-ucc-generator/
 - Consult OpenAI API documentation: https://platform.openai.com/docs/api-reference/usage
 
+## Development
+
+The collectors are tested outside Splunk. Fixtures are shaped from OpenAI's
+published OpenAPI schemas rather than from what the code happens to read,
+which is what makes them worth running: the previous release passed its own
+assumptions and collected nothing.
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install pytest requests
+.venv/bin/python -m pytest tests/ -q
+```
+
+`tests/conftest.py` stubs `import_declare_test`, `solnlib` and `splunklib` so
+the helper imports without a Splunk installation. No API key is needed; the
+tests never make a network call.
+
+When adding a collector, check the path and the response field names against
+`openai/openai-openapi` and add the path to `REAL_USAGE_PATHS` in
+`tests/test_endpoints.py`.
+
 ## License
 
 See LICENSE.txt in the LICENSES directory.
 
 ## Version History
+
+### 1.1.0
+
+Correctness release.  Version 1.0.0 was written against an assumed shape of
+the Organization Usage API rather than the published one, and did not collect
+anything.  Checked against `openai/openai-openapi`:
+
+**Endpoints that did not exist**
+- `audio_transcription` and `audio_speech` both requested `/usage/audio`.
+  They are separate endpoints, `/usage/audio_transcriptions` and
+  `/usage/audio_speeches`.  The model-prefix filter used to tell them apart
+  is gone, and with it a bug that dropped all `gpt-4o-transcribe` usage.
+- `code_interpreter` requested `/usage/code_interpreter`; the path is
+  `/usage/code_interpreter_sessions`.
+- `web_search` requested `/usage/web_search`; the path is
+  `/usage/web_search_calls`.
+- `fine_tuning` requested `/usage/fine_tuning`, which does not exist in any
+  form.  The collector, its saved search, and its price rows are removed.
+  Inference against a fine-tuned model is billed through `completions`.
+
+**Requests the API rejected**
+- `limit` was 100 on every request.  With `bucket_width=1d` the maximum is
+  31, so every call returned HTTP 400.
+
+**Fields that were read under the wrong name**, and so indexed as zero:
+`images` (was `num_images`), `seconds` (was `input_seconds`), `characters`
+(was `num_characters`), `num_requests` and `context_level` (were
+`num_queries` and `context_tokens`).
+
+**Searches that matched nothing**
+- Every saved search and eventtype filtered on `status!=error`.  Successful
+  events carry no `status` field, and an SPL field comparison does not match
+  events where the field is absent.  Now `NOT status=error`.
+- `index=*` is replaced by the `openai_usage_index` macro.
+
+**New**
+- `costs` collector reading `/v1/organization/costs`: what OpenAI actually
+  billed, in currency, rather than a quantity multiplied by a local price
+  list.  With an `Estimated vs Billed Reconciliation` search to show drift.
+- `moderations` and `file_search` collectors, previously missing.
+- **Attribution Dimensions** input setting.  Usage can now be grouped by
+  `project_id`, `user_id`, `api_key_id` and `vector_store_id`, not just
+  model.  These are the only handles OpenAI exposes for attributing spend
+  inside an organisation.  Dimensions an endpoint does not support are
+  dropped for that endpoint rather than sent and rejected.
+- `tests/`, run with `pytest`.  Fixtures are shaped from the published
+  OpenAPI schemas, not from what the collectors happen to read.
 
 ### 1.0.0 (Initial Release)
 - Account management with encrypted API key storage
@@ -473,6 +594,5 @@ See LICENSE.txt in the LICENSES directory.
   - `code_interpreter` — Agents API session counts
   - `web_search` — query counts and context tokens
   - `vector_stores` — RAG storage bytes (GB·day billing)
-  - `fine_tuning` — training token usage and job counts
 - Cost enrichment lookup (`openai_model_costs.csv`) with `transforms.conf`
 - 10 pre-built daily summary saved searches
