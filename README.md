@@ -64,47 +64,20 @@ Create a new data input with the following parameters:
 - **Index:** Splunk index for storing usage data (default: main)
 - **Account:** Select the configured OpenAI account
 - **Start Date:** (Optional) Start date for collecting historical data (YYYY-MM-DD format)
-- **Models to Track:** Select which models to monitor (default: All Models).
-  Model IDs are matched against the `model` field returned by the OpenAI Usage
-  API. When in doubt, use **All Models** and filter in Splunk searches.
+- **Models:** (Optional) Comma-separated model IDs to restrict collection to,
+  e.g. `gpt-4o, o3, text-embedding-3-small`. Sent to the API as its `models`
+  filter; endpoints with no model dimension ignore it.
 
-  | Model | Series | Endpoint types |
-  |---|---|---|
-  | All Models (*) | — | All |
-  | GPT-5.4 | GPT-5 Frontier | completions |
-  | GPT-5.4 Pro | GPT-5 Frontier | completions |
-  | GPT-5.2 | GPT-5 Frontier | completions |
-  | GPT-5.1 | GPT-5 Frontier | completions |
-  | GPT-5 | GPT-5 Frontier | completions |
-  | GPT-5 mini | GPT-5 Efficient | completions |
-  | GPT-5 nano | GPT-5 Efficient | completions |
-  | o3 | Reasoning | completions |
-  | o4-mini | Reasoning | completions |
-  | o3-mini | Reasoning | completions |
-  | o1 | Reasoning | completions |
-  | GPT-4.1 | GPT-4.1 | completions |
-  | GPT-4.1 mini | GPT-4.1 | completions |
-  | GPT-4.1 nano | GPT-4.1 | completions |
-  | GPT-4o | GPT-4o | completions |
-  | GPT-4o mini | GPT-4o | completions |
-  | text-embedding-3-large | Embeddings | embeddings |
-  | text-embedding-3-small | Embeddings | embeddings |
-  | text-embedding-ada-002 | Embeddings | embeddings |
-  | GPT Image 1 | Images | images |
-  | DALL-E 3 | Images | images |
-  | DALL-E 2 | Images | images |
-  | Whisper 1 | Audio | audio_transcription |
-  | TTS-1 | Audio | audio_speech |
-  | TTS-1 HD | Audio | audio_speech |
-  | GPT-4 Turbo (Legacy) | Legacy | completions |
-  | GPT-4 (Legacy) | Legacy | completions |
-  | GPT-3.5 Turbo (Legacy) | Legacy | completions |
+  **Leave this empty.** An allowlist in a monitoring tool is a silent data-loss
+  mechanism: any model it does not name is absent from your cost data, and
+  nothing tells you. A model released next month would simply not appear.
 
-- **Additional Model IDs:** Free-text field for model IDs not in the dropdown
-  above (e.g. `gpt-4o-2024-11-20`, `ft:gpt-4o:my-org:my-model:abc123`).
-  Enter as a comma-separated list. These are merged with the **Models to Track**
-  selection. If **All Models** is selected this field has no effect (all models
-  already pass through).
+  There is no dropdown of known models, deliberately. Nobody can maintain an
+  accurate list, including OpenAI: the `AssistantSupportedModels` enum in their
+  own published OpenAPI spec still tops out at `gpt-5-2025-08-07`. A hardcoded
+  list in a third-party add-on has no chance, and the previous release shipped
+  one alongside a free-text override field, which was an admission that it did
+  not work.
 
 - **Attribution Dimensions:** (Optional) Break usage down by `project_id`,
   `user_id`, `api_key_id` and `vector_store_id` in addition to model.
@@ -256,6 +229,11 @@ updating.
 | `cost_per_output_unit_usd` | USD cost per one unit of `output_unit` |
 | `notes` | Human-readable pricing note |
 
+The shipped file covers models whose pricing could be verified. Anything not
+listed produces a null estimate, which reads as zero spend in a `sum()`. The
+**Models With No Price Row** search reports those so the gap is visible rather
+than silently wrong. Add rows as needed; the file is not overwritten on upgrade.
+
 ### Cost enrichment pattern
 
 ```spl
@@ -304,6 +282,7 @@ Reports, and Alerts.
 | OpenAI Usage - File Search Daily Summary | Search call counts by vector store |
 | OpenAI Usage - Vector Store Storage Daily Summary | Peak bytes stored |
 | OpenAI Cost - Estimated vs Billed Reconciliation | Drift between the local price list and the real bill |
+| OpenAI Cost - Models With No Price Row | Models being used that have no price row, so estimate as null |
 
 All searches read through the `openai_usage_index` macro.  Point that at your
 index once in `default/macros.conf` instead of editing each search.
@@ -565,6 +544,27 @@ anything.  Checked against `openai/openai-openapi`:
   events carry no `status` field, and an SPL field comparison does not match
   events where the field is absent.  Now `NOT status=error`.
 - `index=*` is replaced by the `openai_usage_index` macro.
+
+**The response was never unwrapped**
+- `data` holds time buckets (`{object: "bucket", start_time, end_time,
+  results: [...]}`); the metrics live on the nested `results`.  The add-on
+  formatted the bucket itself, so even a request that succeeded produced an
+  event with a correct timestamp and zero for every metric — indistinguishable
+  from "this model was not used".
+
+**Model filtering**
+- Filtering happened client-side: fetch everything, discard non-matching rows.
+  Same API calls, and any model the add-on had not heard of was dropped
+  rather than counted.  The `models` filter is now sent as a query parameter
+  on the seven endpoints that accept one.
+- The model dropdown and its `custom_models` override field are replaced by a
+  single optional free-text **Models** field, empty by default.  Maintaining a
+  list of current models is not possible for a third-party add-on; OpenAI's own
+  spec enum stops at `gpt-5-2025-08-07`.
+- Price rows for models that could not be verified are removed rather than
+  shipped with guessed numbers.  A wrong price yields a confident wrong total;
+  a missing one yields a null the new **Models With No Price Row** search
+  reports.
 
 **New**
 - `costs` collector reading `/v1/organization/costs`: what OpenAI actually

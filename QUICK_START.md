@@ -70,7 +70,8 @@ $SPLUNK_HOME/bin/splunk restart
      - Index (default: main)
      - Account (select from dropdown)
      - Start Date (optional, YYYY-MM-DD)
-     - Models to Track (default: All Models)
+     - Models (optional; leave empty to collect every model)
+     - Attribution Dimensions (optional; project / user / API key)
 
 3. **Save and Enable**
 
