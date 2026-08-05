@@ -29,7 +29,12 @@ provisioned now.
 
 ## Version
 
-**Version:** 1.1.0
+**Version:** 1.1.0 — see [Version History](#version-history) for what changed.
+
+1.1.0 is a correctness release. 1.0.0 did not collect usable data: several
+collectors requested endpoints that do not exist, every request exceeded the
+API's `limit` cap, and the response envelope was never unwrapped. If you are
+running 1.0.0, treat anything it indexed as unreliable.
 
 ## Installation
 
@@ -338,29 +343,30 @@ Requires `project_id` in the input's Attribution Dimensions.
 
 ## File Structure
 
+This is the source layout. `ucc-gen build` reads it and emits a deployable
+add-on into `output/TA-openai-usage/`, adding the generated `app.conf`,
+`inputs.conf`, `restmap.conf` and UI files.
+
 ```
 TA-openai-usage/
-├── bin/                          # Input scripts and helpers
-│   └── openai_usage_helper.py    # Collector registry and data collection logic
-├── default/                      # Configuration files
-│   ├── app.conf
-│   ├── inputs.conf
-│   ├── props.conf                # openai:usage sourcetype definition
-│   ├── transforms.conf           # openai_model_costs lookup definition
-│   ├── savedsearches.conf        # Pre-built daily summary searches
-│   ├── restmap.conf
-│   ├── server.conf
-│   ├── web.conf
-│   └── data/ui/                  # UI configuration
-├── lookups/
-│   └── openai_model_costs.csv    # Per-unit pricing for all known models
-├── lib/                          # Python dependencies
-│   ├── splunktaucclib/
-│   ├── solnlib/
-│   └── ...
-├── static/                       # App icons
-├── README/                       # Configuration specs
-└── metadata/                     # Permissions
+├── globalConfig.json                # UCC config: account + input fields
+├── package/
+│   ├── app.manifest
+│   ├── bin/
+│   │   └── openai_usage_helper.py   # Collector registry and fetch logic
+│   ├── default/
+│   │   ├── eventtypes.conf
+│   │   ├── macros.conf              # openai_usage_index and friends
+│   │   ├── props.conf               # openai:usage sourcetype
+│   │   ├── savedsearches.conf
+│   │   ├── tags.conf
+│   │   └── transforms.conf          # openai_model_costs lookup definition
+│   ├── lib/requirements.txt         # Bundled at build time into lib/
+│   ├── lookups/
+│   │   └── openai_model_costs.csv   # Per-unit pricing, hand-maintained
+│   ├── static/                      # App icons
+│   └── LICENSES/
+└── tests/                           # pytest suite, runs without Splunk
 ```
 
 ## Development
@@ -382,7 +388,7 @@ TA-openai-usage/
 
 4. Build the add-on:
    ```bash
-   ucc-gen build --ta-version 1.0.0 --python-binary-name .venv/bin/python3
+   ucc-gen build --ta-version 1.1.0 --python-binary-name .venv/bin/python3
    ```
 
 5. Package the add-on:
@@ -396,24 +402,60 @@ The built add-on will be in the `output/` directory.
 
 To collect from a new OpenAI usage endpoint:
 
-1. Add a new subclass of `UsageCollector` in `package/bin/openai_usage_helper.py`:
-   - Set `endpoint_type`, `url`, `supports_model_filter`, and `group_by`
-   - Implement `format_record()` to map API fields to Splunk event fields
-   - Override `collect()` only if the endpoint needs non-standard request parameters
+Check the path, the response field names and the `group_by` enum against
+[`openai/openai-openapi`](https://github.com/openai/openai-openapi) first.
+Every bug in 1.0.0 came from skipping that step.
+
+1. Add a subclass of `UsageCollector` in `package/bin/openai_usage_helper.py`:
+   - Set `endpoint_type`, `url`, `supports_model_filter` and `group_by`
+   - Set `supported_group_by` from the endpoint's `group_by` enum. Dimensions
+     outside it are dropped rather than sent, because one unrecognised value
+     rejects the whole request
+   - Implement `format_record()`, reading the field names the API returns.
+     It receives one entry from a bucket's `results`, with the bucket window
+     already folded in
+   - Override `collect()` only for non-standard request parameters
 
 2. Append an instance to `COLLECTOR_REGISTRY`.
 
-3. Add cost rows for the new endpoint to `package/lookups/openai_model_costs.csv`.
+3. Add the path to `REAL_USAGE_PATHS` in `tests/test_endpoints.py` and add a
+   `format_record()` test with a fixture shaped from the OpenAPI schema.
 
 4. Add a saved search to `package/default/savedsearches.conf`.
 
-5. Rebuild with `ucc-gen build`.
+5. Add cost rows to `package/lookups/openai_model_costs.csv` **only if** the
+   billable quantity is on the usage record. Where pricing depends on
+   something the record does not carry (context level, session duration,
+   storage duration), leave it to the billed-cost searches.
+
+6. Run `pytest tests/ -q`, then rebuild with `ucc-gen build`.
 
 ### Updating Model Pricing
 
 Edit `package/lookups/openai_model_costs.csv` directly.  The file is copied
 into the built add-on and is not overwritten by upgrades.  After editing,
 rebuild and redeploy.
+
+### Tests
+
+The collectors are tested outside Splunk. Fixtures are shaped from OpenAI's
+published OpenAPI schemas rather than from what the code happens to read,
+which is what makes them worth running: the previous release passed its own
+assumptions and collected nothing.
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install pytest requests
+.venv/bin/python -m pytest tests/ -q
+```
+
+`tests/conftest.py` stubs `import_declare_test`, `solnlib` and `splunklib` so
+the helper imports without a Splunk installation. No API key is needed; the
+tests never make a network call.
+
+When adding a collector, check the path and the response field names against
+`openai/openai-openapi` and add the path to `REAL_USAGE_PATHS` in
+`tests/test_endpoints.py`.
 
 ### Modifying Configuration UI
 
@@ -474,8 +516,15 @@ index=_internal source=*openai_usage*
    - Check the Organization ID if specified
 
 5. **Cost lookup returning no match:**
-   - Model IDs in the CSV must exactly match what the API returns
-   - Use `| search model=*` to find the exact model string, then add it to the CSV
+   - Run the **Models With No Price Row** saved search; it lists exactly which
+     model and endpoint pairs are missing and how much they are being used
+   - Model IDs in the CSV must match what the API returns exactly
+   - A missing row yields a null estimate, which sums to zero. Billed cost from
+     `endpoint_type=costs` is unaffected
+
+6. **Events with requests but zero tokens:**
+   - Means the response envelope is not being unwrapped correctly for that
+     endpoint. Compare `format_record()` against the endpoint's result schema
 
 ## Support
 
@@ -483,31 +532,6 @@ For issues, questions, or contributions:
 - Review Splunk internal logs: `index=_internal source=*openai_usage*`
 - Check UCC framework documentation: https://splunk.github.io/addonfactory-ucc-generator/
 - Consult OpenAI API documentation: https://platform.openai.com/docs/api-reference/usage
-
-## Development
-
-The collectors are tested outside Splunk. Fixtures are shaped from OpenAI's
-published OpenAPI schemas rather than from what the code happens to read,
-which is what makes them worth running: the previous release passed its own
-assumptions and collected nothing.
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install pytest requests
-.venv/bin/python -m pytest tests/ -q
-```
-
-`tests/conftest.py` stubs `import_declare_test`, `solnlib` and `splunklib` so
-the helper imports without a Splunk installation. No API key is needed; the
-tests never make a network call.
-
-When adding a collector, check the path and the response field names against
-`openai/openai-openapi` and add the path to `REAL_USAGE_PATHS` in
-`tests/test_endpoints.py`.
-
-## License
-
-See LICENSE.txt in the LICENSES directory.
 
 ## Version History
 
@@ -580,6 +604,12 @@ anything.  Checked against `openai/openai-openapi`:
   OpenAPI schemas, not from what the collectors happen to read.
 
 ### 1.0.0 (Initial Release)
+
+> The list below is what 1.0.0 claimed to do. Much of it was not accurate:
+> several of these collectors targeted endpoints that do not exist, and none
+> of them returned usable metrics. Kept here as a record of the release, not
+> as a description of working behaviour.
+
 - Account management with encrypted API key storage
 - Configurable data inputs with multiple models support
 - Polling interval from 5 minutes to 24 hours
@@ -596,3 +626,7 @@ anything.  Checked against `openai/openai-openapi`:
   - `vector_stores` — RAG storage bytes (GB·day billing)
 - Cost enrichment lookup (`openai_model_costs.csv`) with `transforms.conf`
 - 10 pre-built daily summary saved searches
+
+## License
+
+See LICENSE.txt in the LICENSES directory.
