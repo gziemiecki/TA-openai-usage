@@ -548,6 +548,10 @@ def fetch_usage_with_pagination(
         }
         if not omit_bucket_width:
             params["bucket_width"] = "1d"
+        # Let the API do the filtering.  Doing it here costs the same request
+        # and silently drops any model the add-on does not recognise.
+        if collector.supports_model_filter and model_filter:
+            params["models"] = model_filter
         group_by = collector.resolve_group_by(extra_group_by)
         if group_by:
             params["group_by"] = group_by
@@ -612,17 +616,27 @@ def fetch_usage_with_pagination(
                     "status": "error",
                 }]
 
-            records = data.get("data", [])
-            logger.info(f"Received {len(records)} records in page {page_count}")
+            buckets = data.get("data", [])
+            logger.info(f"Received {len(buckets)} buckets in page {page_count}")
 
-            for record in records:
-                if collector.supports_model_filter and model_filter is not None:
-                    if record.get("model", "") not in model_filter:
-                        continue
+            # `data` holds time buckets, each carrying the window and a list of
+            # results.  The metrics are on the results; the timestamps are on
+            # the bucket, so they have to be folded into each event.
+            for bucket in buckets:
+                window = {
+                    "start_time": bucket.get("start_time"),
+                    "bucket_start_time": bucket.get("start_time"),
+                    "bucket_end_time": bucket.get("end_time"),
+                }
+                for result in bucket.get("results", []):
+                    record = dict(result)
+                    for key, value in window.items():
+                        if value is not None:
+                            record.setdefault(key, value)
 
-                formatted = collector.format_record(record)
-                if formatted is not None:
-                    all_records.append(formatted)
+                    formatted = collector.format_record(record)
+                    if formatted is not None:
+                        all_records.append(formatted)
 
             has_more = data.get("has_more", False)
             next_page = data.get("next_page")
@@ -886,23 +900,15 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter):
             organization_id = account_details.get("organization_id")
             proxies = get_proxy_settings(session_key, logger)
 
-            # Merge multiselect models with any additional free-text model IDs
             models = input_item.get("models", "")
-            custom_models_str = input_item.get("custom_models", "").strip()
-            if custom_models_str:
-                extra_ids = [m.strip() for m in custom_models_str.split(",") if m.strip()]
-                if extra_ids:
-                    if models and models.strip() and models.strip() != "*":
-                        models = f"{models},{','.join(extra_ids)}"
-                    # If '*' (all models) is selected, custom_models has no further
-                    # effect since the filter is already open — no action needed.
-                    logger.info(f"Including additional model IDs from custom_models: {extra_ids}")
 
             logger.info(f"Fetching OpenAI usage data for account: {account_name}")
             if organization_id:
                 logger.info(f"Using organization ID: {organization_id}")
-            if models:
-                logger.info(f"Tracking models: {models}")
+            if models and models.strip() and models.strip() != "*":
+                logger.info(f"Restricting collection to models: {models}")
+            else:
+                logger.info("Collecting all models")
 
             # ----------------------------------------------------------------
             # Fetch and write events

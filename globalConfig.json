@@ -162,144 +162,15 @@
                             ]
                         },
                         {
-                            "type": "multipleSelect",
-                            "label": "Models to Track",
-                            "field": "models",
-                            "help": "Select which OpenAI models to track usage for. Defaults to All Models (*). Model IDs are matched against the model field returned by the OpenAI Usage API.",
-                            "required": false,
-                            "defaultValue": "*",
-                            "options": {
-                                "items": [
-                                    {
-                                        "value": "*",
-                                        "label": "All Models"
-                                    },
-                                    {
-                                        "value": "gpt-5.4",
-                                        "label": "GPT-5.4"
-                                    },
-                                    {
-                                        "value": "gpt-5.4-pro",
-                                        "label": "GPT-5.4 Pro"
-                                    },
-                                    {
-                                        "value": "gpt-5.2",
-                                        "label": "GPT-5.2"
-                                    },
-                                    {
-                                        "value": "gpt-5.1",
-                                        "label": "GPT-5.1"
-                                    },
-                                    {
-                                        "value": "gpt-5",
-                                        "label": "GPT-5"
-                                    },
-                                    {
-                                        "value": "gpt-5-mini",
-                                        "label": "GPT-5 mini"
-                                    },
-                                    {
-                                        "value": "gpt-5-nano",
-                                        "label": "GPT-5 nano"
-                                    },
-                                    {
-                                        "value": "o3",
-                                        "label": "o3"
-                                    },
-                                    {
-                                        "value": "o4-mini",
-                                        "label": "o4-mini"
-                                    },
-                                    {
-                                        "value": "o3-mini",
-                                        "label": "o3-mini"
-                                    },
-                                    {
-                                        "value": "o1",
-                                        "label": "o1"
-                                    },
-                                    {
-                                        "value": "gpt-4.1",
-                                        "label": "GPT-4.1"
-                                    },
-                                    {
-                                        "value": "gpt-4.1-mini",
-                                        "label": "GPT-4.1 mini"
-                                    },
-                                    {
-                                        "value": "gpt-4.1-nano",
-                                        "label": "GPT-4.1 nano"
-                                    },
-                                    {
-                                        "value": "gpt-4o",
-                                        "label": "GPT-4o"
-                                    },
-                                    {
-                                        "value": "gpt-4o-mini",
-                                        "label": "GPT-4o mini"
-                                    },
-                                    {
-                                        "value": "text-embedding-3-large",
-                                        "label": "text-embedding-3-large"
-                                    },
-                                    {
-                                        "value": "text-embedding-3-small",
-                                        "label": "text-embedding-3-small"
-                                    },
-                                    {
-                                        "value": "text-embedding-ada-002",
-                                        "label": "text-embedding-ada-002"
-                                    },
-                                    {
-                                        "value": "gpt-image-1",
-                                        "label": "GPT Image 1"
-                                    },
-                                    {
-                                        "value": "dall-e-3",
-                                        "label": "DALL-E 3"
-                                    },
-                                    {
-                                        "value": "dall-e-2",
-                                        "label": "DALL-E 2"
-                                    },
-                                    {
-                                        "value": "whisper-1",
-                                        "label": "Whisper 1"
-                                    },
-                                    {
-                                        "value": "tts-1",
-                                        "label": "TTS-1"
-                                    },
-                                    {
-                                        "value": "tts-1-hd",
-                                        "label": "TTS-1 HD"
-                                    },
-                                    {
-                                        "value": "gpt-4-turbo",
-                                        "label": "GPT-4 Turbo (Legacy)"
-                                    },
-                                    {
-                                        "value": "gpt-4",
-                                        "label": "GPT-4 (Legacy)"
-                                    },
-                                    {
-                                        "value": "gpt-3.5-turbo",
-                                        "label": "GPT-3.5 Turbo (Legacy)"
-                                    }
-                                ],
-                                "delimiter": ","
-                            }
-                        },
-                        {
                             "type": "text",
-                            "label": "Additional Model IDs",
-                            "field": "custom_models",
-                            "help": "Comma-separated model IDs not listed above (e.g. gpt-4o-2024-11-20, ft:gpt-4o:org:name:id). Applied in addition to the Models to Track selection. Use this for dated snapshot variants, fine-tuned model IDs, or any model released after this TA version.",
+                            "label": "Models",
+                            "field": "models",
+                            "help": "Optional. Comma-separated model IDs to restrict collection to, e.g. gpt-4o, o3, text-embedding-3-small. Leave empty to collect every model, which is the recommended setting: an allowlist silently omits any model it does not name, so usage of a newly released model would not appear in your cost data. Sent to the API as its models filter; endpoints without a model dimension ignore it.",
                             "required": false,
                             "validators": [
                                 {
                                     "type": "string",
-                                    "errorMsg": "Additional Model IDs must be 1 to 2000 characters",
+                                    "errorMsg": "Models must be 0 to 2000 characters",
                                     "minLength": 0,
                                     "maxLength": 2000
                                 }
