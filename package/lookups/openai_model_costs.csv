@@ -1,11 +1,11 @@
 model,endpoint_type,input_unit,cost_per_input_unit_usd,output_unit,cost_per_output_unit_usd,notes
-gpt-5.4,completions,input_tokens,0.00003,output_tokens,0.00012,Per token (estimated)
-gpt-5.4-pro,completions,input_tokens,0.00006,output_tokens,0.00024,Per token (estimated)
-gpt-5.2,completions,input_tokens,0.000015,output_tokens,0.00006,Per token (estimated)
-gpt-5.1,completions,input_tokens,0.000010,output_tokens,0.00004,Per token (estimated)
-gpt-5,completions,input_tokens,0.000010,output_tokens,0.00004,Per token (estimated)
-gpt-5-mini,completions,input_tokens,0.000002,output_tokens,0.000008,Per token (estimated)
-gpt-5-nano,completions,input_tokens,0.0000005,output_tokens,0.000002,Per token (estimated)
+gpt-5.4,completions,input_tokens,0.00003,output_tokens,0.00012,Per token (UNVERIFIED - check against OpenAI pricing)
+gpt-5.4-pro,completions,input_tokens,0.00006,output_tokens,0.00024,Per token (UNVERIFIED - check against OpenAI pricing)
+gpt-5.2,completions,input_tokens,0.000015,output_tokens,0.00006,Per token (UNVERIFIED - check against OpenAI pricing)
+gpt-5.1,completions,input_tokens,0.000010,output_tokens,0.00004,Per token (UNVERIFIED - check against OpenAI pricing)
+gpt-5,completions,input_tokens,0.000010,output_tokens,0.00004,Per token (UNVERIFIED - check against OpenAI pricing)
+gpt-5-mini,completions,input_tokens,0.000002,output_tokens,0.000008,Per token (UNVERIFIED - check against OpenAI pricing)
+gpt-5-nano,completions,input_tokens,0.0000005,output_tokens,0.000002,Per token (UNVERIFIED - check against OpenAI pricing)
 o3,completions,input_tokens,0.00001,output_tokens,0.00004,Per token
 o4-mini,completions,input_tokens,0.0000011,output_tokens,0.0000044,Per token
 o3-mini,completions,input_tokens,0.0000011,output_tokens,0.0000044,Per token
@@ -27,9 +27,3 @@ dall-e-2,images,num_images,0.018,,,Per image (1024x1024)
 whisper-1,audio_transcription,input_seconds,0.0001,,,Per second ($0.006/minute)
 tts-1,audio_speech,num_characters,0.000015,,,Per character ($15.00/1M chars)
 tts-1-hd,audio_speech,num_characters,0.00003,,,Per character ($30.00/1M chars)
-*,code_interpreter,num_sessions,0.03,,,Per session (all models)
-*,web_search,num_queries,0.03,,,Per query (all models)
-*,vector_stores,bytes_stored,0.0000001,,,Per byte per day (~$0.10/GB/day)
-gpt-4o,fine_tuning,input_tokens,0.000025,output_tokens,0.00001,Per token (fine-tuning training)
-gpt-4o-mini,fine_tuning,input_tokens,0.0000003,output_tokens,0.0000012,Per token (fine-tuning training)
-gpt-3.5-turbo,fine_tuning,input_tokens,0.000008,output_tokens,0.000008,Per token (fine-tuning training legacy)

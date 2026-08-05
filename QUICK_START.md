@@ -79,7 +79,7 @@ $SPLUNK_HOME/bin/splunk restart
 Wait for one polling interval, then search:
 
 ```spl
-index=main sourcetype="openai:usage"
+`openai_usage_ok`
 ```
 
 Check internal logs:
@@ -112,7 +112,7 @@ index=_internal source=*openai_usage*
   - GPT-4 Turbo, GPT-4, GPT-3.5 Turbo (legacy)
 
 ### Python Helper Module
-- ✅ OpenAI SDK integration (openai>=1.0.0)
+- ✅ Organization Usage and Costs API collection over `requests`
 - ✅ Error handling and logging
 - ✅ Modular design for easy customization
 - ✅ Supports organization ID
@@ -120,7 +120,6 @@ index=_internal source=*openai_usage*
 - ✅ Model filtering
 
 ### Dependencies (Bundled)
-- ✅ openai>=1.0.0
 - ✅ splunktaucclib
 - ✅ splunk-sdk
 - ✅ solnlib
@@ -131,20 +130,19 @@ index=_internal source=*openai_usage*
 
 Edit: `package/bin/openai_usage_helper.py`
 
-The `get_openai_usage_data()` function is where you can add specific OpenAI API calls:
+Collectors live in `COLLECTOR_REGISTRY`. To add an endpoint, subclass
+`UsageCollector`, set `url` and `endpoint_type`, implement `format_record()`,
+and declare `supported_group_by` from the endpoint's `group_by` enum in
+`openai/openai-openapi`. Add the path to `REAL_USAGE_PATHS` in
+`tests/test_endpoints.py` and run the suite:
 
-```python
-def get_openai_usage_data(logger, api_key, organization_id, start_date, models):
-    # Add your custom OpenAI API calls here
-    # Example:
-    # usage = client.usage.list(date=start_date)
-    # return usage data
-    pass
+```bash
+.venv/bin/python -m pytest tests/ -q
 ```
 
 After modifications:
 ```bash
-ucc-gen build --ta-version 1.0.0 --python-binary-name .venv/bin/python3
+ucc-gen build --ta-version 1.1.0 --python-binary-name .venv/bin/python3
 ```
 
 ### Add More Configuration Fields

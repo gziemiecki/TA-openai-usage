@@ -4,7 +4,7 @@ import os
 import re
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Dict, FrozenSet, List, Optional
 
 import import_declare_test
 from solnlib import checkpointer, conf_manager, log
@@ -18,8 +18,18 @@ except ImportError:
 
 ADDON_NAME = "TA-openai-usage"
 BASE_URL = "https://api.openai.com/v1/organization/usage"
+COSTS_URL = "https://api.openai.com/v1/organization/costs"
 MAX_PAGES = 50
+# The API caps `limit` by bucket width: 31 for 1d, 168 for 1h, 1440 for 1m.
+# Every collector uses daily buckets.
+MAX_RESULTS_PER_PAGE = 31
 MAX_ERROR_DETAIL_LENGTH = 512
+
+# Dimensions an input may ask the API to break usage down by.  These are the
+# only handles OpenAI exposes for attributing spend to something inside your
+# organisation, so what you can answer later is decided by how you provision
+# projects and keys now.
+ATTRIBUTION_DIMENSIONS = ("project_id", "user_id", "api_key_id", "vector_store_id")
 
 PROXY_CREDENTIALS_RE = re.compile(
     r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<creds>[^/@:\s]+(?::[^/@\s]*)?@)"
@@ -50,6 +60,26 @@ def sanitize_error_detail(detail: Optional[str]) -> str:
     if len(sanitized) > MAX_ERROR_DETAIL_LENGTH:
         sanitized = sanitized[:MAX_ERROR_DETAIL_LENGTH] + "... [truncated]"
     return sanitized
+
+
+def parse_group_by(value: Optional[str]) -> List[str]:
+    """
+    Turn the ``group_by`` input setting into a validated list of dimensions.
+
+    Only attribution dimensions belong here.  ``model`` is excluded because
+    every collector whose endpoint supports it already groups by model; adding
+    it as a user-supplied option would only create a way to ask for it twice.
+    Unknown values are dropped rather than passed through, since the API
+    rejects an entire request for one unrecognised group_by entry.
+    """
+    if not value:
+        return []
+    resolved: List[str] = []
+    for candidate in value.split(","):
+        candidate = candidate.strip()
+        if candidate in ATTRIBUTION_DIMENSIONS and candidate not in resolved:
+            resolved.append(candidate)
+    return resolved
 
 
 def get_account_details(session_key: str, account_name: str) -> Dict[str, str]:
@@ -130,18 +160,31 @@ class UsageCollector(ABC):
     endpoint_type: str          # Used as the Splunk event field value
     url: str                    # Full API endpoint URL
     supports_model_filter: bool = True   # Set False for tool/storage endpoints
-    group_by: List[str] = ["model"]      # API group_by param; empty list omits it
+    group_by: List[str] = ["model"]      # Always-on grouping; empty list omits it
+
+    # Values this endpoint's group_by enum accepts.  Anything the input asks
+    # for that is not in here is dropped rather than sent, because the API
+    # rejects the whole request for one unsupported dimension.
+    supported_group_by: FrozenSet[str] = frozenset(
+        {"project_id", "user_id", "api_key_id", "model"}
+    )
 
     @abstractmethod
     def format_record(self, record: Dict) -> Optional[Dict]:
         """
         Map a single raw API response record to a Splunk event dict.
 
-        Return None to silently skip the record.  This is used by collectors
-        that share a URL (e.g. AudioTranscription and AudioSpeech both hit
-        /audio but each owns a different model prefix).
+        Return None to silently skip the record.
         """
         ...
+
+    def resolve_group_by(self, extra_group_by: Optional[List[str]]) -> List[str]:
+        """Merge the collector's default grouping with what the input asked for."""
+        resolved = [g for g in self.group_by if g in self.supported_group_by]
+        for dimension in extra_group_by or []:
+            if dimension in self.supported_group_by and dimension not in resolved:
+                resolved.append(dimension)
+        return resolved
 
     def collect(
         self,
@@ -151,6 +194,7 @@ class UsageCollector(ABC):
         end_time: int,
         model_filter: Optional[List[str]],
         proxies: Optional[Dict[str, str]],
+        extra_group_by: Optional[List[str]] = None,
     ) -> List[Dict]:
         """Fetch and return all records for this collector's time window."""
         return fetch_usage_with_pagination(
@@ -161,6 +205,7 @@ class UsageCollector(ABC):
             end_time=end_time,
             model_filter=model_filter,
             proxies=proxies,
+            extra_group_by=extra_group_by,
         )
 
 
@@ -179,7 +224,7 @@ def _base_event(record: Dict, endpoint_type: str) -> Dict:
     }
     if "model" in record:
         event["model"] = record["model"]
-    for opt in ("project_id", "api_key_id", "model_id", "bucket_start_time", "bucket_end_time"):
+    for opt in ("project_id", "user_id", "api_key_id", "bucket_start_time", "bucket_end_time"):
         if opt in record:
             event[opt] = record[opt]
     return event
@@ -231,58 +276,47 @@ class ImagesCollector(UsageCollector):
         event = _base_event(record, self.endpoint_type)
         event.update({
             "num_model_requests": record.get("num_model_requests", 0),
-            "num_images": record.get("num_images", 0),
+            "num_images": record.get("images", 0),
         })
-        if "size" in record:
-            event["size"] = record["size"]
-        if "quality" in record:
-            event["quality"] = record["quality"]
+        for opt in ("size", "source"):
+            if opt in record:
+                event[opt] = record[opt]
         return event
 
 
 class AudioTranscriptionCollector(UsageCollector):
     """
-    Collects Whisper (speech-to-text) usage from the /audio endpoint.
+    Collects speech-to-text usage, billed per second of audio.
 
-    The /audio endpoint returns both Whisper and TTS records in the same
-    response.  This collector claims only the Whisper records (model prefix
-    ``whisper``); AudioSpeechCollector claims the TTS records.  Because both
-    collectors hit the same URL, the API is called twice per run — once per
-    collector.  This is intentional: the two billing dimensions (seconds vs.
-    characters) are distinct enough that conflating them in a single event
-    would make cost analysis misleading.
+    Transcription and speech are separate endpoints with separate billing
+    units, so no model-name filtering is needed to tell them apart.  Filtering
+    on a ``whisper`` prefix would also silently drop gpt-4o-transcribe usage.
     """
     endpoint_type = "audio_transcription"
-    url = BASE_URL + "/audio"
+    url = BASE_URL + "/audio_transcriptions"
     supports_model_filter = True
     group_by = ["model"]
-    _model_prefix = "whisper"
 
     def format_record(self, record: Dict) -> Optional[Dict]:
-        if not record.get("model", "").startswith(self._model_prefix):
-            return None
         event = _base_event(record, self.endpoint_type)
         event.update({
-            "input_seconds": record.get("input_seconds", 0),
+            "input_seconds": record.get("seconds", 0),
             "num_model_requests": record.get("num_model_requests", 0),
         })
         return event
 
 
 class AudioSpeechCollector(UsageCollector):
-    """Collects TTS (text-to-speech) usage from the /audio endpoint."""
+    """Collects text-to-speech usage, billed per character."""
     endpoint_type = "audio_speech"
-    url = BASE_URL + "/audio"
+    url = BASE_URL + "/audio_speeches"
     supports_model_filter = True
     group_by = ["model"]
-    _model_prefix = "tts"
 
     def format_record(self, record: Dict) -> Optional[Dict]:
-        if not record.get("model", "").startswith(self._model_prefix):
-            return None
         event = _base_event(record, self.endpoint_type)
         event.update({
-            "num_characters": record.get("num_characters", 0),
+            "num_characters": record.get("characters", 0),
             "num_model_requests": record.get("num_model_requests", 0),
         })
         return event
@@ -290,9 +324,10 @@ class AudioSpeechCollector(UsageCollector):
 
 class CodeInterpreterCollector(UsageCollector):
     endpoint_type = "code_interpreter"
-    url = BASE_URL + "/code_interpreter"
+    url = BASE_URL + "/code_interpreter_sessions"
     supports_model_filter = False
     group_by = []
+    supported_group_by = frozenset({"project_id"})
 
     def format_record(self, record: Dict) -> Optional[Dict]:
         event = _base_event(record, self.endpoint_type)
@@ -303,17 +338,25 @@ class CodeInterpreterCollector(UsageCollector):
 
 
 class WebSearchCollector(UsageCollector):
+    """
+    Collects built-in web search tool calls.
+
+    Search pricing varies by ``context_level`` (low/medium/high), so that
+    field is carried through rather than assuming a flat per-query rate.
+    """
     endpoint_type = "web_search"
-    url = BASE_URL + "/web_search"
-    supports_model_filter = False
-    group_by = []
+    url = BASE_URL + "/web_search_calls"
+    supports_model_filter = True
+    group_by = ["model"]
 
     def format_record(self, record: Dict) -> Optional[Dict]:
         event = _base_event(record, self.endpoint_type)
         event.update({
-            "num_queries": record.get("num_queries", 0),
-            "context_tokens": record.get("context_tokens", 0),
+            "num_requests": record.get("num_requests", 0),
+            "num_model_requests": record.get("num_model_requests", 0),
         })
+        if "context_level" in record:
+            event["context_level"] = record["context_level"]
         return event
 
 
@@ -330,6 +373,7 @@ class VectorStoresCollector(UsageCollector):
     url = BASE_URL + "/vector_stores"
     supports_model_filter = False
     group_by = []
+    supported_group_by = frozenset({"project_id"})
 
     def format_record(self, record: Dict) -> Optional[Dict]:
         event = _base_event(record, self.endpoint_type)
@@ -347,6 +391,7 @@ class VectorStoresCollector(UsageCollector):
         end_time: int,
         model_filter: Optional[List[str]],
         proxies: Optional[Dict[str, str]],
+        extra_group_by: Optional[List[str]] = None,
     ) -> List[Dict]:
         return fetch_usage_with_pagination(
             logger=logger,
@@ -357,18 +402,14 @@ class VectorStoresCollector(UsageCollector):
             model_filter=model_filter,
             proxies=proxies,
             omit_bucket_width=True,
+            extra_group_by=extra_group_by,
         )
 
 
-class FineTuningCollector(UsageCollector):
-    """
-    Collects fine-tuning training job usage.
 
-    Fine-tuning runs are often the single largest cost spike in an
-    organization's OpenAI bill and are tracked separately from inference.
-    """
-    endpoint_type = "fine_tuning"
-    url = BASE_URL + "/fine_tuning"
+class ModerationsCollector(UsageCollector):
+    endpoint_type = "moderations"
+    url = BASE_URL + "/moderations"
     supports_model_filter = True
     group_by = ["model"]
 
@@ -376,11 +417,60 @@ class FineTuningCollector(UsageCollector):
         event = _base_event(record, self.endpoint_type)
         event.update({
             "input_tokens": record.get("input_tokens", 0),
-            "output_tokens": record.get("output_tokens", 0),
             "num_model_requests": record.get("num_model_requests", 0),
         })
-        if "training_steps" in record:
-            event["training_steps"] = record["training_steps"]
+        return event
+
+
+class FileSearchCollector(UsageCollector):
+    """
+    Collects built-in file search tool calls.
+
+    Grouped by vector store rather than model: file search has no model
+    dimension, and per-store attribution is what makes retrieval spend
+    traceable back to a corpus.
+    """
+    endpoint_type = "file_search"
+    url = BASE_URL + "/file_search_calls"
+    supports_model_filter = False
+    group_by = []
+    supported_group_by = frozenset(
+        {"project_id", "user_id", "api_key_id", "vector_store_id"}
+    )
+
+    def format_record(self, record: Dict) -> Optional[Dict]:
+        event = _base_event(record, self.endpoint_type)
+        event["num_requests"] = record.get("num_requests", 0)
+        if "vector_store_id" in record:
+            event["vector_store_id"] = record["vector_store_id"]
+        return event
+
+
+class CostsCollector(UsageCollector):
+    """
+    Collects billed cost from /organization/costs.
+
+    This is the only endpoint that reports money.  Everything under
+    /organization/usage reports quantities, which have to be multiplied by a
+    price list the add-on would otherwise have to maintain by hand and keep
+    in step with OpenAI's pricing changes.  Prefer these numbers for anything
+    that reaches a finance conversation; use the usage endpoints to explain
+    what drove them.
+    """
+    endpoint_type = "costs"
+    url = COSTS_URL
+    supports_model_filter = False
+    group_by = ["line_item"]
+    supported_group_by = frozenset({"project_id", "line_item"})
+
+    def format_record(self, record: Dict) -> Optional[Dict]:
+        event = _base_event(record, self.endpoint_type)
+        amount = record.get("amount") or {}
+        event["cost_usd"] = amount.get("value", 0)
+        event["currency"] = amount.get("currency", "usd")
+        for opt in ("line_item", "quantity"):
+            if record.get(opt) is not None:
+                event[opt] = record[opt]
         return event
 
 
@@ -394,10 +484,12 @@ COLLECTOR_REGISTRY: List[UsageCollector] = [
     ImagesCollector(),
     AudioTranscriptionCollector(),
     AudioSpeechCollector(),
+    ModerationsCollector(),
     CodeInterpreterCollector(),
     WebSearchCollector(),
+    FileSearchCollector(),
     VectorStoresCollector(),
-    FineTuningCollector(),
+    CostsCollector(),
 ]
 
 
@@ -414,6 +506,7 @@ def fetch_usage_with_pagination(
     model_filter: Optional[List[str]] = None,
     proxies: Optional[Dict[str, str]] = None,
     omit_bucket_width: bool = False,
+    extra_group_by: Optional[List[str]] = None,
 ) -> List[Dict]:
     """
     Paginate through an OpenAI usage endpoint and return formatted records.
@@ -451,12 +544,13 @@ def fetch_usage_with_pagination(
         params: Dict = {
             "start_time": start_time,
             "end_time": end_time,
-            "limit": 100,
+            "limit": MAX_RESULTS_PER_PAGE,
         }
         if not omit_bucket_width:
             params["bucket_width"] = "1d"
-        if collector.group_by:
-            params["group_by"] = collector.group_by
+        group_by = collector.resolve_group_by(extra_group_by)
+        if group_by:
+            params["group_by"] = group_by
         if next_page:
             params["page"] = next_page
 
@@ -585,6 +679,7 @@ def get_openai_usage_data(
     organization_id: Optional[str] = None,
     models: Optional[str] = None,
     proxies: Optional[Dict[str, str]] = None,
+    group_by: Optional[str] = None,
 ) -> List[Dict]:
     """
     Collect usage data from all registered OpenAI usage collectors.
@@ -596,6 +691,9 @@ def get_openai_usage_data(
         end_time:        End of collection window as a Unix timestamp (exclusive).
         organization_id: Optional OpenAI organization ID.
         models:          Comma-separated model IDs, or '*' / empty for all models.
+        group_by:        Comma-separated attribution dimensions (project_id,
+                         user_id, api_key_id, vector_store_id).  Collectors
+                         drop any dimension their endpoint does not support.
                          Model IDs not in the dropdown can be supplied here.
         proxies:         Optional proxy dict from get_proxy_settings().
 
@@ -623,6 +721,10 @@ def get_openai_usage_data(
         f"(Unix: {start_time} to {end_time})"
     )
 
+    extra_group_by = parse_group_by(group_by)
+    if extra_group_by:
+        logger.info(f"Grouping usage by additional dimensions: {', '.join(extra_group_by)}")
+
     model_filter: Optional[List[str]] = None
     if models and models.strip():
         candidates = [m.strip() for m in models.split(",") if m.strip()]
@@ -649,6 +751,7 @@ def get_openai_usage_data(
                 end_time=end_time,
                 model_filter=model_filter,
                 proxies=proxies,
+                extra_group_by=extra_group_by,
             )
             all_usage_data.extend(records)
             logger.info(f"Collected {len(records)} {collector.endpoint_type} usage records")
@@ -811,6 +914,7 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter):
                 end_time=end_time,
                 organization_id=organization_id,
                 models=models,
+                group_by=input_item.get("group_by", ""),
                 proxies=proxies,
             )
 
